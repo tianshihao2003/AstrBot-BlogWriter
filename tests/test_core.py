@@ -1,0 +1,466 @@
+# -*- coding: utf-8 -*-
+"""blog_writer_core 核心逻辑单元测试。"""
+
+import sys
+import os
+import unittest
+from datetime import datetime, timedelta
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from blog_writer_core import (  # noqa: E402
+    SESSION_TIMEOUT,
+    Session,
+    build_amap_url,
+    build_github_put_body,
+    build_imgbed_upload,
+    build_moment_md,
+    build_note_md,
+    build_place_md,
+    build_upload_url,
+    build_friend_md,
+    clean_filename_part,
+    extract_tags,
+    format_moment_published,
+    gen_moment_id,
+    moment_filename,
+    next_friend_index,
+    note_filename,
+    parse_amap_response,
+    parse_dynamic,
+    parse_friend_text,
+    parse_github_put_response,
+    parse_imgbed_response,
+    parse_message,
+    parse_note,
+    parse_place,
+    place_filename,
+    upload_base_host,
+    validate_friend_data,
+    with_suffix,
+)
+
+try:
+    import yaml
+except ImportError:
+    yaml = None
+
+
+class TestParseMessage(unittest.TestCase):
+    def test_command_with_slash(self):
+        self.assertEqual(parse_message("/动态 今天去了公园")[0], "动态")
+        self.assertEqual(parse_message("/动态 今天去了公园")[1], ["今天去了公园"])
+
+    def test_command_without_slash(self):
+        self.assertEqual(parse_message("发布")[0], "发布")
+
+    def test_unknown_message(self):
+        cmd, _, raw = parse_message("随便聊聊")
+        self.assertIsNone(cmd)
+        self.assertEqual(raw, "随便聊聊")
+
+    def test_empty(self):
+        self.assertIsNone(parse_message("")[0])
+        self.assertIsNone(parse_message("   ")[0])
+
+    def test_multi_space(self):
+        cmd, args, _ = parse_message("/笔记 日常随笔 我的标题")
+        self.assertEqual(cmd, "笔记")
+        self.assertEqual(args, ["日常随笔", "我的标题"])
+
+
+class TestParseArgs(unittest.TestCase):
+    def test_dynamic(self):
+        content, tags = parse_dynamic(["今天", "去了公园"])
+        self.assertEqual(content, "今天 去了公园")
+        self.assertEqual(tags, [])
+
+    def test_dynamic_with_tags(self):
+        content, tags = parse_dynamic(["今天去了公园", "#日常", "#2026"])
+        self.assertEqual(content, "今天去了公园")
+        self.assertEqual(tags, ["日常", "2026"])
+        # 标签去重
+        content, tags = parse_dynamic(["内容", "#日常", "#日常"])
+        self.assertEqual(tags, ["日常"])
+        # 只有标签没有正文
+        content, tags = parse_dynamic(["#日常"])
+        self.assertIsNone(content)
+        self.assertEqual(tags, ["日常"])
+
+    def test_dynamic_empty(self):
+        self.assertEqual(parse_dynamic([]), (None, []))
+        self.assertEqual(parse_dynamic(["  "]), (None, []))
+
+    def test_note_two_args(self):
+        self.assertEqual(parse_note(["日常随笔", "标题"], "默认"), ("日常随笔", "标题"))
+
+    def test_note_one_arg_uses_default_dir(self):
+        self.assertEqual(parse_note(["标题"], "日常随笔"), ("日常随笔", "标题"))
+
+    def test_note_multi_word_title(self):
+        self.assertEqual(parse_note(["每日总结", "今天", "很好"], "默认"), ("每日总结", "今天 很好"))
+
+    def test_note_no_args(self):
+        self.assertEqual(parse_note([], "默认"), ("默认", ""))
+
+    def test_place(self):
+        self.assertEqual(parse_place(["陕西", "华阴市华山", "去找宝宝了"]), ("陕西", "华阴市华山", "去找宝宝了", []))
+
+    def test_place_with_tags(self):
+        self.assertEqual(
+            parse_place(["陕西", "华阴市华山", "去找宝宝了", "#旅游", "#2026"]),
+            ("陕西", "华阴市华山", "去找宝宝了", ["旅游", "2026"]),
+        )
+
+    def test_place_two_args(self):
+        self.assertEqual(parse_place(["陕西", "华阴市华山"]), ("陕西", "华阴市华山", "", []))
+
+    def test_place_one_arg(self):
+        self.assertEqual(parse_place(["华山"]), ("", "华山", "", []))
+
+    def test_place_empty(self):
+        self.assertEqual(parse_place([]), ("", "", "", []))
+
+    def test_extract_tags(self):
+        clean, tags = extract_tags("今天 #日常 去公园\n第二行 #2026")
+        self.assertEqual(tags, ["日常", "2026"])
+        self.assertNotIn("#", clean)
+        self.assertEqual(clean, "今天 去公园\n第二行")
+
+
+class TestNaming(unittest.TestCase):
+    def test_moment_id_format(self):
+        m = gen_moment_id()
+        self.assertTrue(m.startswith("ext-"))
+        self.assertTrue(m[4:].isdigit())
+
+    def test_published_format(self):
+        self.assertRegex(format_moment_published(), r"^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$")
+
+    def test_filenames(self):
+        day = datetime(2026, 8, 8)
+        self.assertEqual(moment_filename(day), "2026-08-08")
+        self.assertEqual(note_filename(day), "2026年8月8日")
+        self.assertEqual(note_filename(datetime(2026, 6, 1)), "2026年6月1日")
+        self.assertEqual(place_filename(day), "2026-08-08")
+
+    def test_with_suffix(self):
+        self.assertEqual(with_suffix("a", ".md", 0), "a.md")
+        self.assertEqual(with_suffix("a", ".md", 1), "a-1.md")
+        self.assertEqual(with_suffix("a", ".md", 10), "a-10.md")
+
+
+class TestMarkdown(unittest.TestCase):
+    def test_moment_md_structure(self):
+        md = build_moment_md("今天去了公园", ["https://img.tsh520.cn/file/a.jpg"], "团子和蛋糕", "/assets/ziyuan/tx.webp", ["日常"])
+        lines = md.split("\n")
+        self.assertEqual(lines[0], "---")
+        self.assertTrue("---" in lines)
+        # 对齐现有格式：published 不加引号，无 id 字段
+        self.assertIn("published: 20", md)
+        self.assertNotIn('"published"', md)
+        self.assertNotIn("id: ext-", md)
+        self.assertIn("author: 团子和蛋糕", md)
+        # 图片在 frontmatter 的 images 数组（URL 裸写，对齐现有风格），正文只有文字
+        self.assertIn("images:", md)
+        self.assertIn("  - https://img.tsh520.cn/file/a.jpg", md)
+        self.assertNotIn("![a.jpg]", md)
+        self.assertIn("今天去了公园", md)
+        if yaml:
+            fm = yaml.safe_load(md.split("---")[1])
+            self.assertEqual(fm["author"], "团子和蛋糕")
+            self.assertEqual(fm["tags"], ["日常"])
+            self.assertEqual(fm["images"], ["https://img.tsh520.cn/file/a.jpg"])
+            self.assertNotIn("id", fm)
+            self.assertIn("published", fm)
+
+    def test_moment_md_no_images(self):
+        md = build_moment_md("纯文字动态", [], "团子和蛋糕", "/assets/ziyuan/tx.webp", ["日常"])
+        self.assertNotIn("images:", md)
+        if yaml:
+            fm = yaml.safe_load(md.split("---")[1])
+            self.assertEqual(fm.get("images"), None)
+
+    def test_note_md(self):
+        md = build_note_md("标题", "正文第一行\n第二行", [], datetime(2026, 8, 8))
+        if yaml:
+            fm = yaml.safe_load(md.split("---")[1])
+            self.assertEqual(fm["name"], "标题")
+            # js-yaml（Astro 用）会把 2026-08-08 当字符串；PyYAML 会解析成 date 对象，两者皆可
+            self.assertTrue(fm["date"] == "2026-08-08" or fm["date"] == datetime(2026, 8, 8).date())
+        self.assertIn("正文第一行\n第二行", md)
+
+    def test_place_md(self):
+        md = build_place_md("陕西", "华阴市华山", "去找宝宝了", ["https://img.tsh520.cn/file/places/x.jpg"], 34.477861, 110.084789, ["旅游"], datetime(2026, 8, 8))
+        if yaml:
+            fm = yaml.safe_load(md.split("---")[1])
+            self.assertEqual(fm["province"], "陕西")
+            self.assertEqual(fm["city"], "华阴市华山")
+            self.assertEqual(fm["experience"], "去找宝宝了")
+            self.assertEqual(fm["lat"], 34.477861)
+            self.assertEqual(fm["lng"], 110.084789)
+            self.assertEqual(fm["visitCount"], 1)
+            self.assertEqual(fm["photos"], ["https://img.tsh520.cn/file/places/x.jpg"])
+            self.assertEqual(fm["tags"], ["旅游"])
+
+    def test_place_md_no_experience(self):
+        md = build_place_md("河南", "安阳", "", [], 36.1, 114.3, ["旅游"], datetime(2026, 8, 8))
+        if yaml:
+            fm = yaml.safe_load(md.split("---")[1])
+            self.assertNotIn("experience", fm)
+
+    def test_yaml_quoting(self):
+        # 含特殊字符的标题必须被正确引用，YAML 可解析
+        md = build_note_md("标题: 带冒号", "正文", [], datetime(2026, 8, 8))
+        if yaml:
+            fm = yaml.safe_load(md.split("---")[1])
+            self.assertEqual(fm["name"], "标题: 带冒号")
+
+    def test_yaml_numeric_tag_quoted(self):
+        # 纯数字字符串必须加引号，否则 YAML 解析成 int，zod z.array(z.string()) 校验失败
+        md = build_place_md("河南", "安阳", "", [], 36.1, 114.3, ["旅游", "2026"], datetime(2026, 8, 8))
+        self.assertIn('- "2026"', md)
+        if yaml:
+            fm = yaml.safe_load(md.split("---")[1])
+            self.assertEqual(fm["tags"], ["旅游", "2026"])
+
+    def test_yaml_url_unquoted(self):
+        # URL 裸写，对齐现有数据风格（- https://img.tsh520.cn/file/places/xxx.jpg）
+        md = build_place_md("陕西", "华山", "", ["https://img.tsh520.cn/file/places/x.jpg"], 1.0, 2.0, ["旅游"], datetime(2026, 8, 8))
+        self.assertIn("  - https://img.tsh520.cn/file/places/x.jpg", md)
+        if yaml:
+            fm = yaml.safe_load(md.split("---")[1])
+            self.assertEqual(fm["photos"], ["https://img.tsh520.cn/file/places/x.jpg"])
+
+
+class TestRequests(unittest.TestCase):
+    def test_imgbed_upload_multipart(self):
+        req = build_imgbed_upload("https://img.tsh520.cn/file", "a.png", b"1234")
+        self.assertIn("multipart/form-data; boundary=", req["headers"]["Content-Type"])
+        self.assertIn(b'name="file"; filename="a.png"', req["body"])
+        self.assertTrue(req["body"].endswith(b"--\r\n") or req["body"].endswith(b"--"))
+        self.assertIn(b"1234", req["body"])
+
+    def test_imgbed_response(self):
+        # 新版数组格式（官方文档 src/api/upload.md）：优先取 src（规范路径）
+        ok, url = parse_imgbed_response(
+            200, '[{"src": "/file/abc123_image.jpg", "publicUrl": "https://img.tsh520.cn/abc123_image.jpg"}]',
+            "img.tsh520.cn",
+        )
+        self.assertTrue(ok)
+        self.assertEqual(url, "https://img.tsh520.cn/file/abc123_image.jpg")
+        # src 相对路径 → 拼主机
+        ok, url = parse_imgbed_response(200, '[{"src": "/file/x.jpg"}]', "img.tsh520.cn")
+        self.assertTrue(ok)
+        self.assertEqual(url, "https://img.tsh520.cn/file/x.jpg")
+        # 完整链接原样返回
+        ok, url = parse_imgbed_response(200, '[{"src": "https://cdn.other.com/x.jpg"}]', "img.tsh520.cn")
+        self.assertTrue(ok)
+        self.assertEqual(url, "https://cdn.other.com/x.jpg")
+        # 空数组
+        ok, url = parse_imgbed_response(200, "[]", "img.tsh520.cn")
+        self.assertFalse(ok)
+        # 旧格式兼容
+        ok, url = parse_imgbed_response(200, '{"code":200,"data":{"url":"https://x/a.jpg"}}', "")
+        self.assertTrue(ok)
+        self.assertEqual(url, "https://x/a.jpg")
+        ok, url = parse_imgbed_response(200, '{"code":500,"message":"bad"}', "")
+        self.assertFalse(ok)
+        ok, url = parse_imgbed_response(200, "not json", "")
+        self.assertFalse(ok)
+        ok, url = parse_imgbed_response(200, '{"code":200,"data":"https://x/b.jpg"}', "")
+        self.assertTrue(ok)
+        self.assertEqual(url, "https://x/b.jpg")
+
+    def test_upload_url_helpers(self):
+        self.assertEqual(
+            build_upload_url("https://img.tsh520.cn/upload", "blog/moments"),
+            "https://img.tsh520.cn/upload?returnFormat=full&uploadFolder=blog/moments",
+        )
+        # 已有 authCode 时用 & 追加
+        self.assertEqual(
+            build_upload_url("https://img.tsh520.cn/upload?authCode=abc", "places"),
+            "https://img.tsh520.cn/upload?authCode=abc&returnFormat=full&uploadFolder=places",
+        )
+        # 不重复追加已有参数
+        self.assertEqual(
+            build_upload_url("https://img.tsh520.cn/upload?uploadFolder=x&returnFormat=full", "blog"),
+            "https://img.tsh520.cn/upload?uploadFolder=x&returnFormat=full",
+        )
+        # 空目录不加 uploadFolder
+        self.assertEqual(
+            build_upload_url("https://img.tsh520.cn/upload", ""),
+            "https://img.tsh520.cn/upload?returnFormat=full",
+        )
+        self.assertEqual(upload_base_host("https://img.tsh520.cn/upload"), "img.tsh520.cn")
+
+    def test_amap_url(self):
+        url = build_amap_url("陕西省华阴市华山", "KEY123")
+        self.assertIn("address=%E9%99%95%E8%A5%BF", url)
+        self.assertIn("key=KEY123", url)
+
+    def test_amap_response(self):
+        ok, coords = parse_amap_response(200, '{"status":"1","count":"1","geocodes":[{"location":"110.084789,34.477861"}]}')
+        self.assertTrue(ok)
+        self.assertEqual(coords, (34.477861, 110.084789))
+        ok, coords = parse_amap_response(200, '{"status":"0","count":"0","geocodes":[]}')
+        self.assertFalse(ok)
+        ok, coords = parse_amap_response(200, '{"status":"1","count":"0"}')
+        self.assertFalse(ok)
+        ok, coords = parse_amap_response(200, '{"status":"1","count":"1","geocodes":[{"location":"abc"}]}')
+        self.assertFalse(ok)
+        ok, coords = parse_amap_response(500, "oops")
+        self.assertFalse(ok)
+
+    def test_github_put_body(self):
+        body = build_github_put_body("msg", "内容".encode("utf-8"), "main")
+        self.assertIn('"message": "msg"', body)
+        self.assertIn('"branch": "main"', body)
+        self.assertIn('"content": "', body)
+
+    def test_github_put_response(self):
+        self.assertTrue(parse_github_put_response(201, "{}")[0])
+        self.assertTrue(parse_github_put_response(200, "{}")[0])
+        ok, err = parse_github_put_response(422, "{}")
+        self.assertFalse(ok)
+        self.assertEqual(err, "CONFLICT")
+        ok, err = parse_github_put_response(403, '{"message":"rate limited"}')
+        self.assertFalse(ok)
+        self.assertIn("rate limited", err)
+
+
+class TestSession(unittest.TestCase):
+    def test_expiry(self):
+        now = datetime.now()
+        s = Session("moment", {"content": "x"}, now)
+        self.assertFalse(s.expired(now))
+        self.assertTrue(s.expired(now + SESSION_TIMEOUT + timedelta(seconds=1)))
+
+    def test_touch(self):
+        now = datetime.now()
+        s = Session("moment", {"content": "x"}, now)
+        s.touch(now + timedelta(minutes=29))
+        self.assertFalse(s.expired(now + timedelta(minutes=29) + SESSION_TIMEOUT - timedelta(seconds=1)))
+        self.assertTrue(s.expired(now + timedelta(minutes=29) + SESSION_TIMEOUT + timedelta(seconds=1)))
+
+    def test_text_and_images(self):
+        s = Session("note", {"title": "t"})
+        s.add_text("第一段")
+        s.add_text("第二段")
+        s.add_image("http://x/1.jpg", b"123")
+        self.assertEqual(s.full_text(), "第一段\n第二段")
+        self.assertEqual(len(s.images), 1)
+        self.assertEqual(s.images[0], ("http://x/1.jpg", b"123"))
+
+
+class TestFriend(unittest.TestCase):
+    def test_parse_full(self):
+        text = (
+            "站点名称: 团子和蛋糕\n"
+            "站点描述：如果你喜欢那么欢迎来到我的世界！\n"
+            "站点链接 https://blog.tsh520.cn\n"
+            "头像链接: /assets/ziyuan/tx.webp\n"
+        )
+        data = parse_friend_text(text)
+        self.assertEqual(data["title"], "团子和蛋糕")
+        self.assertEqual(data["desc"], "如果你喜欢那么欢迎来到我的世界！")
+        self.assertEqual(data["siteurl"], "https://blog.tsh520.cn")
+        self.assertEqual(data["imgurl"], "/assets/ziyuan/tx.webp")
+
+    def test_parse_english_keys_and_order(self):
+        text = "siteurl: https://blog.ayeez.cn\ntitle: 阿叶\nimgurl: https://qiniu.ayeez.cn/avatar.jpg\ndesc: 记录生活"
+        data = parse_friend_text(text)
+        self.assertEqual(data["title"], "阿叶")
+        self.assertEqual(data["siteurl"], "https://blog.ayeez.cn")
+        self.assertEqual(data["imgurl"], "https://qiniu.ayeez.cn/avatar.jpg")
+
+    def test_parse_no_key_lines(self):
+        # 无键名：URL 自动归类
+        data = parse_friend_text("我的博客\nhttps://blog.tsh520.cn\nhttps://img.tsh520.cn/avatar.png")
+        self.assertEqual(data["title"], "我的博客")
+        self.assertEqual(data["siteurl"], "https://blog.tsh520.cn")
+        self.assertEqual(data["imgurl"], "https://img.tsh520.cn/avatar.png")
+
+    def test_parse_partial(self):
+        data = parse_friend_text("站点名称: 小明\n其他无关行\n")
+        self.assertEqual(data["title"], "小明")
+        self.assertNotIn("siteurl", data)
+
+    def test_parse_unknown_key_with_url_value(self):
+        # 用户实测格式：键名不在别名表，但值能兜底识别
+        data = parse_friend_text(
+            "网站名称: RAGNote\n"
+            "描述:Life is code. I will debug it.\n"
+            "网站地址: https://ragnote.top/\n"
+            "头像:https://ragnote.top/Avatar.png\n"
+        )
+        self.assertEqual(data["title"], "RAGNote")
+        self.assertEqual(data["desc"], "Life is code. I will debug it.")
+        self.assertEqual(data["siteurl"], "https://ragnote.top/")
+        self.assertEqual(data["imgurl"], "https://ragnote.top/Avatar.png")
+
+    def test_parse_no_colon_space(self):
+        # 冒号后无空格的紧凑格式
+        data = parse_friend_text("站点名称:张三\n站点链接:https://z.com\n站点描述:描述文字")
+        self.assertEqual(data["title"], "张三")
+        self.assertEqual(data["siteurl"], "https://z.com")
+        self.assertEqual(data["desc"], "描述文字")
+
+    def test_parse_butterfly_style_english_keys(self):
+        # Butterfly 主题格式：name / link / avatar / descr
+        data = parse_friend_text(
+            "name: Hexo\nlink: https://hexo.io/\navatar: https://hexo.io/logo.svg\ndescr: 快速强大的博客框架"
+        )
+        self.assertEqual(data["title"], "Hexo")
+        self.assertEqual(data["siteurl"], "https://hexo.io/")
+        self.assertEqual(data["imgurl"], "https://hexo.io/logo.svg")
+        self.assertEqual(data["desc"], "快速强大的博客框架")
+
+    def test_parse_chinese_variants(self):
+        # 中文博客圈常见变体
+        data = parse_friend_text(
+            "博客名：张三的博客\n"
+            "博客地址: https://blog.zhang.com\n"
+            "博主头像: https://blog.zhang.com/avatar.jpg\n"
+            "博主简介：记录生活\n"
+        )
+        self.assertEqual(data["title"], "张三的博客")
+        self.assertEqual(data["siteurl"], "https://blog.zhang.com")
+        self.assertEqual(data["imgurl"], "https://blog.zhang.com/avatar.jpg")
+        self.assertEqual(data["desc"], "记录生活")
+
+    def test_validate(self):
+        ok, _ = validate_friend_data({"title": "a", "siteurl": "https://a.com"})
+        self.assertTrue(ok)
+        ok, err = validate_friend_data({"siteurl": "https://a.com"})
+        self.assertFalse(ok)
+        self.assertIn("名称", err)
+        ok, err = validate_friend_data({"title": "a"})
+        self.assertFalse(ok)
+        self.assertIn("链接", err)
+        ok, err = validate_friend_data({"title": "a", "siteurl": "not-a-url"})
+        self.assertFalse(ok)
+
+    def test_build_friend_md(self):
+        md = build_friend_md("张三", "描述", "https://z.com", "/assets/a.png", ["Blog"])
+        if yaml:
+            fm = yaml.safe_load(md.split("---")[1])
+            self.assertEqual(fm["title"], "张三")
+            self.assertEqual(fm["siteurl"], "https://z.com")
+            self.assertEqual(fm["weight"], 10)
+            self.assertTrue(fm["enabled"])
+
+    def test_clean_filename(self):
+        self.assertEqual(clean_filename_part("张三的博客"), "张三的博客")
+        self.assertEqual(clean_filename_part('a/b:c*d?'), "a-b-c-d")
+        self.assertEqual(clean_filename_part("  "), "friend")
+
+    def test_next_index(self):
+        self.assertEqual(next_friend_index(["01-a.md", "02-b.md", "05-c.md"]), 6)
+        self.assertEqual(next_friend_index(["01-a.md"]), 2)
+        self.assertEqual(next_friend_index([]), 1)
+        self.assertEqual(next_friend_index(["not-numbered.md"]), 1)
+
+
+if __name__ == "__main__":
+    unittest.main()

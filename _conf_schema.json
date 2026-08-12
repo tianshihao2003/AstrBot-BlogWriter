@@ -1,0 +1,82 @@
+{
+  "github_token": {
+    "description": "GitHub fine-grained PAT（Contents 读写，仅限博客仓库）",
+    "type": "string",
+    "default": ""
+  },
+  "github_repo": {
+    "description": "博客仓库 owner/repo",
+    "type": "string",
+    "default": "tianshihao2003/dumplingandcakeblog"
+  },
+  "github_branch": {
+    "description": "目标分支",
+    "type": "string",
+    "default": "main"
+  },
+  "imgbed_upload_url": {
+    "description": "图床上传地址",
+    "type": "string",
+    "default": "https://img.tsh520.cn/upload"
+  },
+  "imgbed_token": {
+    "description": "图床 API_TOKEN",
+    "type": "string",
+    "default": ""
+  },
+  "imgbed_upload_folder": {
+    "description": "上传目录（相对路径，如 blog/moments；足迹照片固定上传到 places）",
+    "type": "string",
+    "default": "blog/moments"
+  },
+  "wx_cdn_base_url": {
+    "description": "微信媒体 CDN 地址（图片下载异常时兜底用；通常无需修改）",
+    "type": "string",
+    "default": "https://novac2c.cdn.weixin.qq.com/c2c"
+  },
+  "amap_key": {
+    "description": "高德 Web 服务 Key（足迹坐标用；留空时读取环境变量 AMAP_KEY）",
+    "type": "string",
+    "default": ""
+  },
+  "author": {
+    "description": "动态作者",
+    "type": "string",
+    "default": "团子和蛋糕"
+  },
+  "avatar": {
+    "description": "动态头像路径",
+    "type": "string",
+    "default": "/assets/ziyuan/tx.webp"
+  },
+  "moment_tags": {
+    "description": "动态默认标签",
+    "type": "list",
+    "default": ["日常"]
+  },
+  "place_tags": {
+    "description": "足迹默认标签",
+    "type": "list",
+    "default": ["旅游"]
+  },
+  "default_note_dir": {
+    "description": "笔记默认分类目录",
+    "type": "string",
+    "default": "日常随笔"
+  },
+  "friend_default_avatar": {
+    "description": "友链默认头像（未提供头像链接时使用）",
+    "type": "string",
+    "default": "/assets/ziyuan/tx.webp"
+  },
+  "friend_tags": {
+    "description": "友链默认标签",
+    "type": "list",
+    "default": ["Blog"]
+  },
+  "allow_users": {
+    "description": "允许使用的用户 ID 列表（个人微信为 wxid）；空列表 = 全部拒绝",
+    "type": "list",
+    "default": []
+  }
+}

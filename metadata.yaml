@@ -1,0 +1,9 @@
+name: astrbot_plugin_blog_writer # 插件唯一识别名
+display_name: BlogWriter
+desc: 通过微信对话更新博客的动态（moments）、笔记（notebooks）、足迹（places），图片自动上传图床并提交 GitHub 触发部署
+version: v1.0.0
+author: tianshihao2003
+repo: https://github.com/tianshihao2003/dumplingandcakeblog
+support_platforms:
+  - weixin_oc
+astrbot_version: ">=4.22.0"

@@ -1,0 +1,428 @@
+# -*- coding: utf-8 -*-
+"""集成冒烟测试：stub 掉 astrbot 依赖与网络 IO，走完整命令链路。"""
+
+import asyncio
+import logging
+import os
+import sys
+import types
+import unittest
+from datetime import datetime
+from pathlib import Path
+
+PLUGIN_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, PLUGIN_DIR)
+
+
+# ---------- astrbot stub ----------
+
+class _Logger:
+    def info(self, *a, **k):
+        pass
+
+    def warning(self, *a, **k):
+        pass
+
+    def error(self, *a, **k):
+        pass
+
+
+def _install_astrbot_stub():
+    astrbot = types.ModuleType("astrbot")
+    api = types.ModuleType("astrbot.api")
+    event_mod = types.ModuleType("astrbot.api.event")
+    star_mod = types.ModuleType("astrbot.api.star")
+    components_mod = types.ModuleType("astrbot.api.message_components")
+    filter_mod = types.ModuleType("astrbot.api.event.filter")
+
+    class AstrBotConfig(dict):
+        pass
+
+    class MessageEventResult:
+        def __init__(self, text):
+            self.text = text
+
+        def message(self, text):
+            self.text = text
+            return self
+
+    class AstrMessageEvent:
+        def __init__(self, message_str="", sender_id="u1", messages=None):
+            self.message_str = message_str
+            self._sender_id = sender_id
+            self._messages = messages or []
+
+        def get_sender_id(self):
+            return self._sender_id
+
+        def get_messages(self):
+            return self._messages
+
+        def plain_result(self, text):
+            return MessageEventResult(text)
+
+    class EventMessageType:
+        ALL = 7
+
+    class Plain:
+        def __init__(self, text):
+            self.text = text
+
+    class Image:
+        def __init__(self, url="", file=""):
+            self.url = url
+            self.file = file
+            self.path = file
+
+    def event_message_type(typ):
+        def deco(fn):
+            return fn
+
+        return deco
+
+    def register(name, author, desc, version):
+        def deco(cls):
+            return cls
+
+        return deco
+
+    filter_mod.EventMessageType = EventMessageType
+    filter_mod.event_message_type = event_message_type
+    event_mod.filter = filter_mod
+    event_mod.AstrMessageEvent = AstrMessageEvent
+    event_mod.MessageEventResult = MessageEventResult
+    api.event = event_mod
+    api.star = star_mod
+    api.AstrBotConfig = AstrBotConfig
+    api.logger = _Logger()
+    components_mod.Image = Image
+    components_mod.Plain = Plain
+    astrbot.api = api
+    astrbot.logger = _Logger()
+
+    class Context:
+        pass
+
+    class Star:
+        def __init__(self, context, config=None):
+            self.context = context
+            self.config = config or {}
+
+    star_mod.Context = Context
+    star_mod.Star = Star
+    star_mod.register = register
+
+    sys.modules["astrbot"] = astrbot
+    sys.modules["astrbot.api"] = api
+    sys.modules["astrbot.api.event"] = event_mod
+    sys.modules["astrbot.api.event.filter"] = filter_mod
+    sys.modules["astrbot.api.star"] = star_mod
+    sys.modules["astrbot.api.message_components"] = components_mod
+
+
+_install_astrbot_stub()
+
+
+class FakeBlogWriter:
+    """真实 BlogWriter 的替身：stub 网络 IO，只验证消息流与产物。"""
+
+    def __init__(self, plugin_cls, config):
+        self.plugin = plugin_cls(Context=types.SimpleNamespace(), config=config)
+        self.plugin.config = config
+        self.committed = []
+
+    async def _upload_images(self, refs):
+        return ["https://img.tsh520.cn/file/" + os.path.basename(r) for r in refs]
+
+    async def _geocode(self, address):
+        return (34.477861, 110.084789)
+
+    async def _commit_md(self, path, md, now):
+        self.committed.append((path, md))
+        return True, path, ""
+
+    async def run(self, event):
+        results = []
+        async for r in self.plugin.on_message(event):
+            results.append(r)
+        return results
+
+    def feed(self, text="", messages=None, sender="u1"):
+        ev = types.SimpleNamespace(
+            message_str=text,
+            get_sender_id=lambda: sender,
+            get_messages=lambda: messages or [],
+            plain_result=lambda t: types.SimpleNamespace(text=t),
+        )
+        return self.run(ev)
+
+
+async def _drive(plugin, text, messages=None):
+    ev = types.SimpleNamespace(
+        message_str=text,
+        get_sender_id=lambda: "u1",
+        get_messages=lambda: messages or [],
+        plain_result=lambda t: types.SimpleNamespace(text=t),
+    )
+    out = []
+    async for r in plugin.plugin.on_message(ev):
+        out.append(r)
+    return [o.text for o in out]
+
+
+class TestFlow(unittest.TestCase):
+    def setUp(self):
+        self.config = {
+            "github_token": "tok",
+            "github_repo": "tianshihao2003/dumplingandcakeblog",
+            "github_branch": "main",
+            "author": "团子和蛋糕",
+            "avatar": "/assets/ziyuan/tx.webp",
+            "moment_tags": ["日常"],
+            "place_tags": ["旅游"],
+            "default_note_dir": "日常随笔",
+            "allow_users": ["u1"],
+        }
+        import main as plugin_main
+
+        class Stubbed(plugin_main.BlogWriter):
+            async def _upload_images(self, stored, folder=""):
+                # stored: [(ref, bytes)]
+                return ["https://img.tsh520.cn/file/" + os.path.basename(ref) for ref, _ in stored]
+
+            async def _download_wx_media(self, enc, aes_hex, aes_b64):
+                return b"fake-image-bytes"
+
+            async def _geocode(self, address):
+                return (34.477861, 110.084789)
+
+            async def _commit_md(self, path, md, now):
+                self.committed.append((path, md))
+                return True, path, ""
+
+            async def terminate(self):
+                pass
+
+        self.plugin = Stubbed(context=types.SimpleNamespace(), config=dict(self.config))
+        self.plugin.committed = []
+
+    async def _send(self, text, messages=None):
+        ev = types.SimpleNamespace(
+            message_str=text,
+            get_sender_id=lambda: "u1",
+            get_messages=lambda: messages or [],
+            plain_result=lambda t: types.SimpleNamespace(text=t),
+        )
+        out = []
+        async for r in self.plugin.on_message(ev):
+            out.append(r)
+        return [o.text for o in out]
+
+    def test_moment_full_flow(self):
+        from astrbot.api.message_components import Image
+
+        tmp = Path(os.environ.get("TEMP", ".")) / "blogwriter_test.png"
+        tmp.write_bytes(b"fake-image-bytes")
+
+        asyncio.get_event_loop().run_until_complete(self._send("/动态 今天去了公园"))
+        self.assertEqual(len(self.plugin._sessions), 1)
+        replies = asyncio.get_event_loop().run_until_complete(
+            self._send("", messages=[Image(file=str(tmp))])
+        )
+        self.assertIn("已收到 1 张图片", replies[0])
+        replies = asyncio.get_event_loop().run_until_complete(self._send("/发布"))
+        self.assertIn("发布成功", replies[0])
+        self.assertEqual(len(self.plugin.committed), 1)
+        path, md = self.plugin.committed[0]
+        self.assertTrue(path.startswith("src/content/moments/"))
+        self.assertIn("今天去了公园", md)
+        self.assertIn("blogwriter_test.png", md)  # 图片进 frontmatter images 数组
+        self.assertNotIn("id: ext-", md)
+        self.assertEqual(len(self.plugin._sessions), 0)
+        tmp.unlink(missing_ok=True)
+
+    def test_note_full_flow(self):
+        asyncio.get_event_loop().run_until_complete(self._send("/笔记 日常随笔 标题"))
+        asyncio.get_event_loop().run_until_complete(self._send("第一段正文"))
+        asyncio.get_event_loop().run_until_complete(self._send("第二段正文"))
+        replies = asyncio.get_event_loop().run_until_complete(self._send("/发布"))
+        self.assertIn("发布成功", replies[0])
+        path, md = self.plugin.committed[0]
+        self.assertTrue(path.startswith("src/content/life/notebooks/日常随笔/"))
+        self.assertIn("name: 标题", md)
+        self.assertIn("第一段正文\n第二段正文", md)
+
+    def test_moment_full_flow_with_tags(self):
+        """自定义标签：默认标签 + # 标签合并去重。"""
+        replies = asyncio.get_event_loop().run_until_complete(self._send("/动态 今天去了公园 #日常 #2026"))
+        self.assertIn("标签：#日常 #2026", replies[0])
+        replies = asyncio.get_event_loop().run_until_complete(self._send("/发布"))
+        self.assertIn("发布成功", replies[0])
+        path, md = self.plugin.committed[0]
+        self.assertIn("  - 日常", md)
+        self.assertIn('  - "2026"', md)
+
+    def test_wx_raw_media_fallback_flow(self):
+        """适配器无 Image 组件时，从 raw_message 提取媒体参数走 curl 兜底。"""
+        raw_message = {
+            "item_list": [
+                {"type": 1, "text_item": {"text": "普通文本"}},
+                {
+                    "type": 2,
+                    "image_item": {
+                        "aeskey": "11" * 16,
+                        "media": {"encrypt_query_param": "ENCPARAM123"},
+                    },
+                },
+            ]
+        }
+
+        async def run():
+            ev = types.SimpleNamespace(
+                message_str="",
+                get_sender_id=lambda: "u1",
+                get_sender_name=lambda: "用户",
+                get_messages=lambda: [types.SimpleNamespace(type="text", text="普通文本")],
+                plain_result=lambda t: types.SimpleNamespace(text=t),
+                message_obj=types.SimpleNamespace(raw_message=raw_message),
+            )
+            out = []
+            async for r in self.plugin.on_message(ev):
+                out.append(r)
+            return out
+
+        asyncio.get_event_loop().run_until_complete(self._send("/动态 兜底测试"))
+        replies = asyncio.get_event_loop().run_until_complete(run())
+        self.assertEqual(len(replies), 1)
+        self.assertIn("已收到 1 张图片", replies[0].text)
+        replies = asyncio.get_event_loop().run_until_complete(self._send("/发布"))
+        self.assertIn("发布成功", replies[0])
+        path, md = self.plugin.committed[0]
+        self.assertIn("images:", md)
+        self.assertIn("https://img.tsh520.cn/file/wxraw_ENCPARAM123", md)
+
+    def test_wx_aes_decrypt_roundtrip(self):
+        """AES-ECB 解密逻辑与微信适配器一致（加密→解密往返验证）。"""
+        from Crypto.Cipher import AES as _AES
+
+        key_hex = "a1b2c3d4e5f60718293a4b5c6d7e8f90"
+        key = bytes.fromhex(key_hex)
+        raw = b"hello wechat image data"
+        pad_len = 16 - (len(raw) % 16)
+        padded = raw + bytes([pad_len]) * pad_len
+        encrypted = _AES.new(key, _AES.MODE_ECB).encrypt(padded)
+        plain = self.plugin._decrypt_wx_media(encrypted, key_hex, "")
+        self.assertEqual(plain, raw)
+        # b64 key 形式（parse_media_aes_key 兼容路径）
+        import base64 as _b64
+
+        plain2 = self.plugin._decrypt_wx_media(encrypted, "", _b64.b64encode(key).decode())
+        self.assertEqual(plain2, raw)
+
+    def test_image_magic_check(self):
+        self.assertTrue(self.plugin._has_image_magic(b"\xff\xd8\xff\xe0rest"))
+        self.assertTrue(self.plugin._has_image_magic(b"\x89PNG\r\n\x1a\n"))
+        self.assertTrue(self.plugin._has_image_magic(b"GIF89a"))
+        self.assertTrue(self.plugin._has_image_magic(b"RIFF\x00\x00\x00\x00WEBP"))
+        self.assertFalse(self.plugin._has_image_magic(b"not an image"))
+        self.assertFalse(self.plugin._has_image_magic(b""))
+
+    def test_friend_full_flow(self):
+        """友链：/友链 → 发送键值对 → 发布 → 检查文件与路径编号。"""
+        self.plugin._github_list_dir_index = self.plugin._github_list_dir_index  # 保留真实逻辑
+        # 替换为假实现：模拟现有 05 个文件
+        async def fake_list_dir(dir_path, repo, branch, token):
+            return 6
+
+        self.plugin._github_list_dir_index = fake_list_dir
+        replies = asyncio.get_event_loop().run_until_complete(self._send("/友链"))
+        self.assertIn("友链会话已创建", replies[0])
+        replies = asyncio.get_event_loop().run_until_complete(
+            self._send("站点名称: 测试友链\n站点描述：欢迎来玩\n站点链接 https://test.com\n头像链接: /assets/ziyuan/tx.webp")
+        )
+        self.assertIn("已识别", replies[0])
+        replies = asyncio.get_event_loop().run_until_complete(self._send("/发布"))
+        self.assertIn("发布成功", replies[0])
+        path, md = self.plugin.committed[0]
+        self.assertEqual(path, "src/content/friends/06-测试友链.md")
+        self.assertIn("title: 测试友链", md)
+        self.assertIn("siteurl: https://test.com", md)
+        self.assertIn("enabled: true", md)
+
+    def test_friend_missing_fields(self):
+        """友链缺字段发布时提示。"""
+        asyncio.get_event_loop().run_until_complete(self._send("/友链"))
+        asyncio.get_event_loop().run_until_complete(
+            self._send("站点名称: 只有名称")
+        )
+        replies = asyncio.get_event_loop().run_until_complete(self._send("/发布"))
+        self.assertIn("站点链接", replies[0])
+        self.assertEqual(len(self.plugin.committed), 0)
+
+    def test_place_full_flow(self):
+        asyncio.get_event_loop().run_until_complete(self._send("/足迹 陕西 华阴市华山 去找宝宝了"))
+        replies = asyncio.get_event_loop().run_until_complete(self._send("/发布"))
+        self.assertIn("发布成功", replies[0])
+        path, md = self.plugin.committed[0]
+        self.assertTrue(path.startswith("src/content/life/places/"))
+        self.assertIn("province: 陕西", md)
+        self.assertIn("lat: 34.477861", md)
+        self.assertIn("lng: 110.084789", md)
+        self.assertIn("experience: 去找宝宝了", md)
+
+    def test_permission_denied_silent(self):
+        """非白名单用户：任何消息都不回复（放行给其他功能），只写日志。"""
+        ev = types.SimpleNamespace(
+            message_str="/动态 x",
+            get_sender_id=lambda: "hacker",
+            get_sender_name=lambda: "黑客",
+            get_messages=lambda: [],
+            plain_result=lambda t: types.SimpleNamespace(text=t),
+        )
+
+        async def run():
+            out = []
+            async for r in self.plugin.on_message(ev):
+                out.append(r)
+            return out
+
+        replies = asyncio.get_event_loop().run_until_complete(run())
+        self.assertEqual(len(replies), 0)
+
+    def test_unrelated_message_passthrough(self):
+        """普通聊天消息（非命令、无会话）一律放行：白名单用户也不回复。"""
+        replies = asyncio.get_event_loop().run_until_complete(self._send("今天天气不错"))
+        self.assertEqual(len(replies), 0)
+        # 非白名单用户的普通消息同样放行
+        ev = types.SimpleNamespace(
+            message_str="你好",
+            get_sender_id=lambda: "hacker",
+            get_sender_name=lambda: "黑客",
+            get_messages=lambda: [],
+            plain_result=lambda t: types.SimpleNamespace(text=t),
+        )
+
+        async def run():
+            out = []
+            async for r in self.plugin.on_message(ev):
+                out.append(r)
+            return out
+
+        replies = asyncio.get_event_loop().run_until_complete(run())
+        self.assertEqual(len(replies), 0)
+
+    def test_no_token(self):
+        self.plugin.config["github_token"] = ""
+        replies = asyncio.get_event_loop().run_until_complete(self._send("/动态 x"))
+        self.assertIn("GitHub Token", replies[0])
+
+    def test_cancel(self):
+        asyncio.get_event_loop().run_until_complete(self._send("/动态 内容"))
+        self.assertEqual(len(self.plugin._sessions), 1)
+        replies = asyncio.get_event_loop().run_until_complete(self._send("/取消"))
+        self.assertIn("已取消", replies[0])
+        self.assertEqual(len(self.plugin._sessions), 0)
+
+
+if __name__ == "__main__":
+    unittest.main()
