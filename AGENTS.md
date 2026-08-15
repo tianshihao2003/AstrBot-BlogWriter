@@ -31,12 +31,17 @@ python -m unittest discover -s tests
 
 修改逻辑层时跑 test_core；改动 main.py 后必须跑 test_smoke（内部 stub `astrbot`，不含真实网络）。
 
-## 发布打包规范（每次交付必做）
+## 发版流程与打包规范（每次发版必做，按顺序执行）
 
-- 打包前必须全量测试通过（`python -m unittest discover -s tests`）。
+1. **全量测试**：`python -m unittest discover -s tests` 必须全部通过（含新增功能用例）。
+2. **打包 zip**：按下方细则输出到本插件目录的 `打包/`，命名 `AstrBot-BlogWriter-vX.Y.Z.zip`（版本号在上一版基础上 +1）。
+3. **推送到 GitHub（必须）**：发版后必须 `git add` 全部改动并提交、推送到 origin main —— 远端仓库 `https://github.com/tianshihao2003/AstrBot-BlogWriter`（公开仓库）。提交信息格式：`feat: AstrBot BlogWriter 插件 vX.Y.Z`（纯文档改动用 `docs: ...`）。推送后 `git ls-remote origin HEAD` 校验远端已是最新提交，`git status` 确认工作区干净。
+4. **交付**：告知用户 zip 路径，并提醒按下方「发布前验收清单」在服务器实测。
+
+### 打包细则
+
 - **只打包 5 个文件**：`main.py`、`blog_writer_core.py`、`metadata.yaml`、`README.md`、`_conf_schema.json`。不含 `tests/`、`AGENTS.md`、`DESIGN.md`。
 - **输出位置**：插件目录内的 `打包/` 子目录（`E:\GithubProgect\MyRunProject\dumplingandcakeblog\plug-in\AstrBot\AstrBot BlogWriter\打包\`）。压缩包一律收进本插件的 `打包/`，不散放在 `plug-in/` 根下。
-- **命名**：`AstrBot-BlogWriter-vX.Y.Z.zip`，版本号在上一版 zip 文件名基础上 +1（历史：…v1.0.16 → v1.0.17 → v1.0.18）。
 - **zip 数量上限**：`打包/` 目录最多保留 **10 个**；每次打出新 zip 后，立即删除最旧的一个（旧版本号靠前的最先删）。
 - **不改内部版本字段**：`metadata.yaml` 与 `main.py` 的 `@register` 里的版本历史上一直保持 `v1.0.0`，只有 zip 文件名与 git 提交信息递增，打包时不要动它们。
 - 打包用 Python（Windows Git Bash 无 zip 命令），把版本号替换成新版：
@@ -54,8 +59,6 @@ with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
         z.write(os.path.join(src, f), f)
 EOF
 ```
-
-- 交付 zip 后如需 git 提交，沿用历史格式：`feat: AstrBot BlogWriter 插件 vX.Y.Z`。
 
 ## 发布前验收清单（自动化测试无法覆盖真实外部依赖，发版后需在服务器人工验收）
 
