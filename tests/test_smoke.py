@@ -176,6 +176,7 @@ class TestFlow(unittest.TestCase):
             "github_token": "tok",
             "github_repo": "tianshihao2003/dumplingandcakeblog",
             "github_branch": "main",
+            # 旧版本配置残留键（author/avatar 已废弃）：必须被静默忽略，不影响运行
             "author": "团子和蛋糕",
             "avatar": "/assets/ziyuan/tx.webp",
             "moment_tags": ["日常"],
@@ -188,6 +189,7 @@ class TestFlow(unittest.TestCase):
         class Stubbed(plugin_main.BlogWriter):
             async def _upload_images(self, stored, folder=""):
                 # stored: [(ref, bytes)]
+                self.last_upload_folder = folder
                 return ["https://img.tsh520.cn/file/" + os.path.basename(ref) for ref, _ in stored]
 
             async def _download_wx_media(self, enc, aes_hex, aes_b64):
@@ -200,11 +202,17 @@ class TestFlow(unittest.TestCase):
                 self.committed.append((path, md))
                 return True, path, ""
 
+            async def _album_index(self, repo, branch, token):
+                # 相册追加/新建分流用；默认空索引，各测试可覆盖 self.album_index_result
+                return self.album_index_result
+
             async def terminate(self):
                 pass
 
         self.plugin = Stubbed(context=types.SimpleNamespace(), config=dict(self.config))
         self.plugin.committed = []
+        self.plugin.last_upload_folder = None
+        self.plugin.album_index_result = {"titles": {}, "files": {}}
 
     async def _send(self, text, messages=None):
         ev = types.SimpleNamespace(
@@ -238,6 +246,10 @@ class TestFlow(unittest.TestCase):
         self.assertIn("今天去了公园", md)
         self.assertIn("blogwriter_test.png", md)  # 图片进 frontmatter images 数组
         self.assertNotIn("id: ext-", md)
+        # 2026-08-13 起不再按条写 author/avatar；图片统一上传到 imgbed_upload_folder（默认 blog/moments）
+        self.assertNotIn("author:", md)
+        self.assertNotIn("avatar:", md)
+        self.assertEqual(self.plugin.last_upload_folder, "blog/moments")
         self.assertEqual(len(self.plugin._sessions), 0)
         tmp.unlink(missing_ok=True)
 
@@ -301,6 +313,98 @@ class TestFlow(unittest.TestCase):
         self.assertIn("images:", md)
         self.assertIn("https://img.tsh520.cn/file/wxraw_ENCPARAM123", md)
 
+    def test_moment_video_flow(self):
+        """动态可发视频：Video 组件（本地 .mp4）→ 上传图床 → URL 进 images 数组。"""
+        tmp = Path(os.environ.get("TEMP", ".")) / "blogwriter_video.mp4"
+        tmp.write_bytes(b"fake-video-bytes")
+
+        video_comp = types.SimpleNamespace(
+            type="Video", url="", file="file://" + str(tmp), path=str(tmp)
+        )
+        asyncio.get_event_loop().run_until_complete(self._send("/动态 视频测试"))
+        replies = asyncio.get_event_loop().run_until_complete(
+            self._send("", messages=[video_comp])
+        )
+        self.assertIn("已收到 1 张图片", replies[0])
+        replies = asyncio.get_event_loop().run_until_complete(self._send("/发布"))
+        self.assertIn("发布成功", replies[0])
+        path, md = self.plugin.committed[0]
+        self.assertIn("  - https://img.tsh520.cn/file/blogwriter_video.mp4", md)
+        self.assertEqual(self.plugin.last_upload_folder, "blog/moments")
+        tmp.unlink(missing_ok=True)
+
+    def test_moment_gif_flow(self):
+        """动态发 GIF 动图：Image 组件 .gif → images 数组保留 .gif。"""
+        from astrbot.api.message_components import Image
+
+        tmp = Path(os.environ.get("TEMP", ".")) / "blogwriter_gif.gif"
+        tmp.write_bytes(b"GIF89a-fake")
+
+        asyncio.get_event_loop().run_until_complete(self._send("/动态 动图测试"))
+        replies = asyncio.get_event_loop().run_until_complete(
+            self._send("", messages=[Image(file=str(tmp))])
+        )
+        self.assertIn("已收到 1 张图片", replies[0])
+        replies = asyncio.get_event_loop().run_until_complete(self._send("/发布"))
+        self.assertIn("发布成功", replies[0])
+        path, md = self.plugin.committed[0]
+        self.assertIn("  - https://img.tsh520.cn/file/blogwriter_gif.gif", md)
+        tmp.unlink(missing_ok=True)
+
+    def test_note_rejects_video(self):
+        """视频仅动态支持：笔记会话收到视频组件应被忽略（不误收）。"""
+        tmp = Path(os.environ.get("TEMP", ".")) / "blogwriter_video2.mp4"
+        tmp.write_bytes(b"fake-video-bytes")
+
+        video_comp = types.SimpleNamespace(
+            type="Video", url="", file="file://" + str(tmp), path=str(tmp)
+        )
+        asyncio.get_event_loop().run_until_complete(self._send("/笔记 日常随笔 标题"))
+        replies = asyncio.get_event_loop().run_until_complete(
+            self._send("", messages=[video_comp])
+        )
+        self.assertEqual(len(replies), 0)  # 未识别为媒体，放行
+        self.assertEqual(len(self.plugin._sessions["u1"].images), 0)
+        tmp.unlink(missing_ok=True)
+
+    def test_wx_raw_video_fallback_flow(self):
+        """动态会话中 raw_message 视频（type 5）走 curl 兜底，ref 带 .mp4 后缀。"""
+        raw_message = {
+            "item_list": [
+                {"type": 1, "text_item": {"text": "普通文本"}},
+                {
+                    "type": 5,
+                    "video_item": {
+                        "media": {"encrypt_query_param": "VIDPARAM456", "aes_key": "22" * 16},
+                        "video_size": 12345,
+                    },
+                },
+            ]
+        }
+
+        async def run():
+            ev = types.SimpleNamespace(
+                message_str="",
+                get_sender_id=lambda: "u1",
+                get_sender_name=lambda: "用户",
+                get_messages=lambda: [types.SimpleNamespace(type="text", text="普通文本")],
+                plain_result=lambda t: types.SimpleNamespace(text=t),
+                message_obj=types.SimpleNamespace(raw_message=raw_message),
+            )
+            out = []
+            async for r in self.plugin.on_message(ev):
+                out.append(r)
+            return out
+
+        asyncio.get_event_loop().run_until_complete(self._send("/动态 视频兜底测试"))
+        replies = asyncio.get_event_loop().run_until_complete(run())
+        self.assertEqual(len(replies), 1)
+        self.assertIn("已收到 1 张图片", replies[0].text)
+        replies = asyncio.get_event_loop().run_until_complete(self._send("/发布"))
+        self.assertIn("发布成功", replies[0])
+        path, md = self.plugin.committed[0]
+        self.assertIn("https://img.tsh520.cn/file/wxraw_VIDPARAM456.mp4", md)
+
     def test_wx_aes_decrypt_roundtrip(self):
         """AES-ECB 解密逻辑与微信适配器一致（加密→解密往返验证）。"""
         from Crypto.Cipher import AES as _AES
@@ -360,7 +464,15 @@ class TestFlow(unittest.TestCase):
         self.assertEqual(len(self.plugin.committed), 0)
 
     def test_place_full_flow(self):
+        from astrbot.api.message_components import Image
+
+        tmp = Path(os.environ.get("TEMP", ".")) / "blogwriter_place.png"
+        tmp.write_bytes(b"fake-image-bytes")
+
         asyncio.get_event_loop().run_until_complete(self._send("/足迹 陕西 华阴市华山 去找宝宝了"))
+        asyncio.get_event_loop().run_until_complete(
+            self._send("", messages=[Image(file=str(tmp))])
+        )
         replies = asyncio.get_event_loop().run_until_complete(self._send("/发布"))
         self.assertIn("发布成功", replies[0])
         path, md = self.plugin.committed[0]
@@ -369,6 +481,95 @@ class TestFlow(unittest.TestCase):
         self.assertIn("lat: 34.477861", md)
         self.assertIn("lng: 110.084789", md)
         self.assertIn("experience: 去找宝宝了", md)
+        # 足迹照片不再单独放 places 目录，统一用 imgbed_upload_folder（默认 blog/moments）
+        self.assertEqual(self.plugin.last_upload_folder, "blog/moments")
+        tmp.unlink(missing_ok=True)
+
+    def test_album_new_flow(self):
+        """新建相册：图片上传 blog/album/<相册名>，创建 src/content/album/<相册名>.md。"""
+        from astrbot.api.message_components import Image
+
+        tmp = Path(os.environ.get("TEMP", ".")) / "blogwriter_album.png"
+        tmp.write_bytes(b"fake-image-bytes")
+
+        asyncio.get_event_loop().run_until_complete(self._send("/相册 情侣头像"))
+        replies = asyncio.get_event_loop().run_until_complete(
+            self._send("", messages=[Image(file=str(tmp))])
+        )
+        self.assertIn("已收到 1 张图片", replies[0])
+        replies = asyncio.get_event_loop().run_until_complete(self._send("/发布"))
+        self.assertIn("发布成功", replies[0])
+        self.assertEqual(self.plugin.last_upload_folder, "blog/album/情侣头像")
+        self.assertEqual(len(self.plugin.committed), 1)
+        path, md = self.plugin.committed[0]
+        self.assertEqual(path, "src/content/album/情侣头像.md")
+        self.assertIn("title: 情侣头像", md)
+        self.assertIn("imgbedFolder: blog/album/情侣头像", md)
+        self.assertNotIn("photos:", md)
+        self.assertEqual(len(self.plugin._sessions), 0)
+        tmp.unlink(missing_ok=True)
+
+    def test_album_append_flow(self):
+        """相册已存在（按文件名命中）：只传图不写文件，回复「已添加」。"""
+        from astrbot.api.message_components import Image
+
+        self.plugin.album_index_result = {
+            "titles": {"Telegram武侠风": "blog/album/武侠风"},
+            "files": {"武侠风.md": "blog/album/武侠风"},
+        }
+        tmp = Path(os.environ.get("TEMP", ".")) / "blogwriter_album2.png"
+        tmp.write_bytes(b"fake-image-bytes")
+
+        asyncio.get_event_loop().run_until_complete(self._send("/相册 武侠风"))
+        asyncio.get_event_loop().run_until_complete(
+            self._send("", messages=[Image(file=str(tmp))])
+        )
+        replies = asyncio.get_event_loop().run_until_complete(self._send("/发布"))
+        self.assertIn("已添加到相册", replies[0])
+        self.assertEqual(self.plugin.last_upload_folder, "blog/album/武侠风")
+        self.assertEqual(len(self.plugin.committed), 0)  # 不写文件、不触发构建
+        self.assertEqual(len(self.plugin._sessions), 0)
+        tmp.unlink(missing_ok=True)
+
+    def test_album_append_by_title_different_filename(self):
+        """按 title 命中已有相册（文件名不同）：追加到它自己的 imgbedFolder，不新建文件。
+
+        回归场景：博客里「测试相册」在 xiangce1.md（imgbedFolder=blog/album/相册1），
+        插件不能因为找不到 测试相册.md 就新建重复相册。
+        """
+        from astrbot.api.message_components import Image
+
+        self.plugin.album_index_result = {
+            "titles": {"测试相册": "blog/album/相册1"},
+            "files": {"xiangce1.md": "blog/album/相册1"},
+        }
+        tmp = Path(os.environ.get("TEMP", ".")) / "blogwriter_album3.png"
+        tmp.write_bytes(b"fake-image-bytes")
+
+        asyncio.get_event_loop().run_until_complete(self._send("/相册 测试相册"))
+        asyncio.get_event_loop().run_until_complete(
+            self._send("", messages=[Image(file=str(tmp))])
+        )
+        replies = asyncio.get_event_loop().run_until_complete(self._send("/发布"))
+        self.assertIn("已添加到相册", replies[0])
+        self.assertEqual(self.plugin.last_upload_folder, "blog/album/相册1")
+        self.assertEqual(len(self.plugin.committed), 0)
+        self.assertEqual(len(self.plugin._sessions), 0)
+        tmp.unlink(missing_ok=True)
+
+    def test_album_text_rejected(self):
+        """相册会话只收图片：发文字给提示。"""
+        asyncio.get_event_loop().run_until_complete(self._send("/相册 情侣头像"))
+        replies = asyncio.get_event_loop().run_until_complete(self._send("这是副标题吗"))
+        self.assertIn("只接收图片", replies[0])
+        self.assertEqual(len(self.plugin.committed), 0)
+
+    def test_album_no_images(self):
+        """相册没有图片不能发布。"""
+        asyncio.get_event_loop().run_until_complete(self._send("/相册 情侣头像"))
+        replies = asyncio.get_event_loop().run_until_complete(self._send("/发布"))
+        self.assertIn("至少需要一张图片", replies[0])
+        self.assertEqual(len(self.plugin.committed), 0)
 
     def test_permission_denied_silent(self):
         """非白名单用户：任何消息都不回复（放行给其他功能），只写日志。"""

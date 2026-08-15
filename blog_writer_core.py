@@ -14,7 +14,7 @@ from typing import Any, Dict, List, Optional, Tuple
 SESSION_TIMEOUT = timedelta(minutes=30)
 MAX_PATH_SUFFIX = 10
 
-COMMANDS = ("动态", "笔记", "足迹", "友链", "发布", "取消", "状态", "帮助")
+COMMANDS = ("动态", "笔记", "足迹", "友链", "相册", "发布", "取消", "状态", "帮助")
 
 # ---------- 命令解析 ----------
 
@@ -64,6 +64,29 @@ def parse_place(args: List[str]) -> Tuple[str, str, str, List[str]]:
     province, city = args[0].strip(), args[1].strip()
     experience, tags = extract_tags(" ".join(args[2:]).strip())
     return province, city, experience, tags
+
+
+def parse_album(args: List[str]) -> str:
+    """/相册 相册名 → 相册名（args 拼接、去空白）。名字为空返回空串。"""
+    return " ".join(a.strip() for a in args if a.strip()).strip()
+
+
+def parse_album_frontmatter(md: str) -> Tuple[str, str]:
+    """从相册 md 文本提取 (title, imgbedFolder)。行级正则解析，容错（引号可带可不带）。
+
+    用于「按 title 判断相册是否存在」：博客相册文件名与 title 不一定相同（如
+    xiangce1.md 的 title 是「测试相册」），必须读内容才能对齐。
+    """
+    title, folder = "", ""
+    for line in (md or "").splitlines():
+        s = line.strip()
+        m = re.match(r"^title\s*:\s*(.*)$", s)
+        if m:
+            title = m.group(1).strip().strip("\"'")
+        m2 = re.match(r"^imgbedFolder\s*:\s*(.*)$", s)
+        if m2:
+            folder = m2.group(1).strip().strip("\"'")
+    return title, folder
 
 
 def extract_tags(text: str) -> Tuple[str, List[str]]:
@@ -175,17 +198,17 @@ def _yaml_str(value: str) -> str:
 def build_moment_md(
     content: str,
     image_urls: List[str],
-    author: str,
-    avatar: str,
     tags: List[str],
     now: datetime = None,
 ) -> str:
-    """对齐现有 moments 格式：图片在 frontmatter 的 images 数组，正文只放文字。"""
+    """对齐现有 moments 格式：图片在 frontmatter 的 images 数组，正文只放文字。
+
+    2026-08-13 起博客不再按条写 author/avatar（content.config.ts 已提供 schema 默认值，
+    全部旧文件已清理），故这里不再生成这两个字段。
+    """
     now = now or datetime.now()
     fm = {
         "published": format_moment_published(now),
-        "author": author,
-        "avatar": avatar,
         "tags": tags,
     }
     if image_urls:
@@ -225,6 +248,20 @@ def build_place_md(
     fm["lng"] = round(lng, 6)
     fm["photos"] = list(photos)
     fm["tags"] = tags
+    return _dump_yaml(fm) + "\n\n\n"
+
+
+def build_album_md(title: str, folder: str, day: datetime = None) -> str:
+    """对齐现有相册格式（2026-08-13 图床化惯例）：只有 title/date/imgbedFolder 三个字段。
+
+    imgbedFolder 指向图床目录，博客详情页运行时动态拉图，故照片不进 md。
+    """
+    day = day or datetime.now()
+    fm = {
+        "title": title,
+        "date": day.strftime("%Y-%m-%d"),
+        "imgbedFolder": folder,
+    }
     return _dump_yaml(fm) + "\n\n\n"
 
 
@@ -553,7 +590,7 @@ class Session:
         meta: Dict[str, Any],
         created_at: datetime = None,
     ):
-        self.kind = kind  # moment | note | place
+        self.kind = kind  # moment | note | place | friend | album
         self.meta = meta
         self.text_parts: List[str] = []
         # 元素为 (来源引用, 图片字节)。图片在收到消息时立即读取，避免临时文件被清理。

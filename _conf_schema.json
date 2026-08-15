@@ -25,9 +25,14 @@
     "default": ""
   },
   "imgbed_upload_folder": {
-    "description": "上传目录（相对路径，如 blog/moments；足迹照片固定上传到 places）",
+    "description": "图片上传目录（动态/笔记/足迹照片统一上传到此目录，如 blog/moments）",
     "type": "string",
     "default": "blog/moments"
+  },
+  "album_folder_prefix": {
+    "description": "相册图片上传目录前缀（实际目录 = 前缀 + 相册名，与博客相册图床化惯例一致）",
+    "type": "string",
+    "default": "blog/album"
   },
   "wx_cdn_base_url": {
     "description": "微信媒体 CDN 地址（图片下载异常时兜底用；通常无需修改）",
@@ -38,16 +43,6 @@
     "description": "高德 Web 服务 Key（足迹坐标用；留空时读取环境变量 AMAP_KEY）",
     "type": "string",
     "default": ""
-  },
-  "author": {
-    "description": "动态作者",
-    "type": "string",
-    "default": "团子和蛋糕"
-  },
-  "avatar": {
-    "description": "动态头像路径",
-    "type": "string",
-    "default": "/assets/ziyuan/tx.webp"
   },
   "moment_tags": {
     "description": "动态默认标签",

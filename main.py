@@ -4,9 +4,10 @@ AstrBot BlogWriter 插件
 通过微信对话更新博客的动态（moments）、笔记（notebooks）、足迹（places）。
 
 用法：
-  /动态 今天去了公园            # 创建动态会话，可继续发图片
+  /动态 今天去了公园            # 创建动态会话，可继续发图片/GIF/视频
   /笔记 日常随笔 标题            # 创建笔记会话，正文由后续文本消息追加
   /足迹 陕西 华阴市华山 去找宝宝了  # 创建足迹会话（坐标由高德地理编码获取）
+  /相册 情侣头像                # 创建相册会话，图片传到 blog/album/<相册名>
   /发布                      # 结束会话：上传图床 → 生成 md → 提交 GitHub
   /取消                      # 丢弃当前会话
   /状态                      # 查看会话状态
@@ -24,19 +25,25 @@ import re
 import urllib.parse
 from datetime import datetime
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import httpx
 
 from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, MessageEventResult, filter
 from astrbot.api.message_components import Image
+
+try:
+    from astrbot.api.message_components import Video
+except ImportError:  # 兼容极老版本（无 Video 组件）
+    Video = None
 from astrbot.api.star import Context, Star, register
 
 try:
     from .blog_writer_core import (
         COMMANDS,
         SESSION_TIMEOUT,
+        build_album_md,
         build_amap_url,
         build_github_put_body,
         build_imgbed_upload,
@@ -53,6 +60,8 @@ try:
         next_friend_index,
         note_filename,
         parse_amap_response,
+        parse_album,
+        parse_album_frontmatter,
         parse_dynamic,
         parse_friend_text,
         parse_github_put_response,
@@ -71,6 +80,7 @@ except ImportError:  # 兼容非包形式加载
     from blog_writer_core import (
         COMMANDS,
         SESSION_TIMEOUT,
+        build_album_md,
         build_amap_url,
         build_github_put_body,
         build_imgbed_upload,
@@ -87,6 +97,8 @@ except ImportError:  # 兼容非包形式加载
         next_friend_index,
         note_filename,
         parse_amap_response,
+        parse_album,
+        parse_album_frontmatter,
         parse_dynamic,
         parse_friend_text,
         parse_github_put_response,
@@ -105,6 +117,7 @@ except ImportError:  # 兼容非包形式加载
 CONNECT_TIMEOUT = 15
 READ_TIMEOUT = 30
 MAX_IMAGE_SIZE = 20 * 1024 * 1024  # 20MB
+MAX_VIDEO_SIZE = 100 * 1024 * 1024  # 100MB（微信视频常超 20MB）
 RETRY_COUNT = 2
 RETRY_DELAYS = (1.0, 3.0)
 
@@ -182,11 +195,11 @@ class BlogWriter(Star):
 
             # 与博客无关的消息（非命令、无进行中会话）一律放行，绝不回复
             if cmd not in COMMANDS and not session:
-                # 例外：无会话时收到图片 → 提示，避免图片被静默丢弃
-                if self._extract_images(event):
-                    logger.info("BlogWriter: 用户 %s 无会话时发送图片，已提示", user_id)
+                # 例外：无会话时收到图片/视频 → 提示，避免媒体被静默丢弃
+                if self._extract_images(event, allow_video=True):
+                    logger.info("BlogWriter: 用户 %s 无会话时发送媒体，已提示", user_id)
                     yield event.plain_result(
-                        "当前没有进行中的会话，图片未接收。请先发 /动态、/笔记 或 /足迹。"
+                        "当前没有进行中的会话，图片/视频未接收。请先发 /动态、/笔记 或 /足迹。"
                     )
                 return
 
@@ -215,6 +228,9 @@ class BlogWriter(Star):
             if cmd == "友链":
                 yield self._start_friend(event, user_id, raw)
                 return
+            if cmd == "相册":
+                yield self._start_album(event, user_id, args)
+                return
             if cmd == "发布":
                 yield await self._publish(event, user_id)
                 return
@@ -242,7 +258,8 @@ class BlogWriter(Star):
                     self._sessions.pop(user_id, None)
                     yield event.plain_result("上一个会话已超时作废，请重新发指令。")
                     return
-                images = self._extract_images(event)
+                allow_video = session.kind == "moment"  # 视频仅动态支持；笔记/足迹/相册仍只收图片
+                images = self._extract_images(event, allow_video=allow_video)
                 if images:
                     logger.info("BlogWriter: 提取到 %d 张图片引用: %s", len(images), images[:3])
                     stored = []
@@ -259,18 +276,19 @@ class BlogWriter(Star):
                 else:
                     # 兜底：适配器下载媒体失败（如微信 CDN TLS 握手被拒）时，
                     # 从 raw_message 提取加密参数，用 curl 下载 + AES 解密。
-                    raw_media = self._extract_wx_raw_media(event)
+                    raw_media = self._extract_wx_raw_media(event, allow_video=allow_video)
                     if raw_media:
                         logger.info("BlogWriter: 尝试 curl 兜底下载 %d 张微信媒体", len(raw_media))
                         stored = []
-                        for enc, aes_hex, aes_b64 in raw_media:
+                        for enc, aes_hex, aes_b64, kind in raw_media:
                             data = await self._download_wx_media(enc, aes_hex, aes_b64)
                             if data is None:
                                 yield event.plain_result(
-                                    "微信图片下载失败（CDN 握手异常且 curl 兜底失败），请重发。"
+                                    "微信媒体下载失败（CDN 握手异常且 curl 兜底失败），请重发。"
                                 )
                                 return
-                            stored.append(("wxraw_{}".format(enc[:16]), data))
+                            suffix = ".mp4" if kind == "video" else ""
+                            stored.append(("wxraw_{}{}".format(enc[:16], suffix), data))
                     else:
                         stored = []
                 if stored:
@@ -302,6 +320,11 @@ class BlogWriter(Star):
                             yield event.plain_result(
                                 "未能识别有效字段，请按「站点名称: xxx」这样的格式发送。"
                             )
+                    elif session.kind == "album":
+                        # 相册会话只收图片（博客相册由图床目录动态加载，md 只需标题/日期）
+                        yield event.plain_result(
+                            "相册只接收图片。请直接发图片，或发 /发布 提交、/取消 放弃。"
+                        )
                     else:
                         session.add_text(text)
                         yield event.plain_result("内容已追加。发 /发布 提交，发 /取消 放弃。")
@@ -321,7 +344,7 @@ class BlogWriter(Star):
         self._sessions[user_id] = Session("moment", {"content": content, "tags": tags})
         tag_hint = "，标签：{}".format(" ".join("#" + t for t in tags)) if tags else ""
         return event.plain_result(
-            "动态已创建：{}{}\n\n可以直接发图片（可多发），发完说 /发布。".format(content, tag_hint)
+            "动态已创建：{}{}\n\n可以直接发图片、动图 GIF 或视频（可多发），发完说 /发布。".format(content, tag_hint)
         )
 
     def _start_note(self, event: AstrMessageEvent, user_id: str, args: List[str]):
@@ -371,15 +394,26 @@ class BlogWriter(Star):
             )
         )
 
+    def _start_album(self, event: AstrMessageEvent, user_id: str, args: List[str]):
+        name = parse_album(args)
+        if not name:
+            return event.plain_result("格式：/相册 相册名（例如：/相册 情侣头像）")
+        self._sessions[user_id] = Session("album", {"name": name})
+        return event.plain_result(
+            "相册「{}」已创建。\n\n请直接发图片（可多发），发完说 /发布。".format(name)
+        )
+
     # ---------- 发布 ----------
 
     async def _publish(self, event: AstrMessageEvent, user_id: str) -> MessageEventResult:
         session = self._session(user_id)
         if not session:
-            return event.plain_result("当前没有进行中的会话，请先发 /动态、/笔记、/足迹 或 /友链。")
+            return event.plain_result("当前没有进行中的会话，请先发 /动态、/笔记、/足迹、/友链 或 /相册。")
         repo = self._cfg("github_repo") or "tianshihao2003/dumplingandcakeblog"
         branch = self._cfg("github_branch") or "main"
         token = (self._cfg("github_token") or "").strip()
+        album_folder = None
+        album_exists = False
         if session.kind == "moment":
             content = ((session.meta.get("content") or "") + "\n\n" + session.full_text()).strip()
             if not content:
@@ -390,12 +424,42 @@ class BlogWriter(Star):
             ok, err = validate_friend_data(session.meta)
             if not ok:
                 return event.plain_result("友链信息不完整：{}。可继续发送补充（格式：站点名称: xxx），或发 /取消。".format(err))
+        elif session.kind == "album":
+            album_name = (session.meta.get("name") or "").strip()
+            if not album_name:
+                return event.plain_result("相册名为空，无法发布。")
+            if not session.images:
+                return event.plain_result("相册至少需要一张图片，无法发布。")
+            # 按 title/文件名判断相册是否已存在：博客相册文件名与 title 不一定相同
+            # （如 xiangce1.md 的 title 是「测试相册」），必须读文件内容才能对齐。
+            album_index = await self._album_index(repo, branch, token)
+            if album_index is None:
+                return event.plain_result("GitHub 查询失败（网络或 Token 问题），已中止发布。")
+            fname = clean_filename_part(album_name)
+            default_folder = "{}/{}".format(
+                (self._cfg("album_folder_prefix") or "blog/album").strip().strip("/"),
+                fname,
+            )
+            matched_folder = album_index["titles"].get(album_name)
+            if matched_folder is not None:
+                # title 命中已有相册：追加到它自己的 imgbedFolder
+                album_exists = True
+                album_folder = matched_folder or default_folder
+            elif (fname + ".md") in album_index["files"]:
+                # 文件名命中（title 不同）：同样追加
+                album_exists = True
+                album_folder = album_index["files"][fname + ".md"] or default_folder
+            else:
+                album_folder = default_folder
 
         # 1. 图片处理（失败即中止，不写 md）
         image_urls = []
         if session.images:
-            # 足迹照片与现有数据一致放 places 目录；动态/笔记用配置的上传目录
-            folder = "places" if session.kind == "place" else (self._cfg("imgbed_upload_folder") or "blog/moments")
+            if session.kind == "album":
+                folder = album_folder
+            else:
+                # 博客图床目录已统一（2026-08-13）：插件上传的图片全部进 imgbed_upload_folder（默认 blog/moments）
+                folder = self._cfg("imgbed_upload_folder") or "blog/moments"
             result = await self._upload_images(session.images, folder)
             if isinstance(result, str):
                 return event.plain_result("图片上传失败，已中止发布：{}".format(result))
@@ -408,8 +472,6 @@ class BlogWriter(Star):
                 md = build_moment_md(
                     content,
                     image_urls,
-                    self._cfg("author", "团子和蛋糕"),
-                    self._cfg("avatar", "/assets/ziyuan/tx.webp"),
                     self._merge_tags(self._cfg("moment_tags", ["日常"]), session.meta.get("tags")),
                     now,
                 )
@@ -442,6 +504,21 @@ class BlogWriter(Star):
                     friend_index, clean_filename_part(title)
                 )
                 link = "/friends"
+            elif session.kind == "album":
+                album_name = (session.meta.get("name") or "").strip()
+                clean_name = clean_filename_part(album_name)
+                if album_exists:
+                    # 追加模式：相册已存在（按 title/文件名命中），只传图不写文件。
+                    # 博客详情页运行时从图床目录动态拉图，照片即时可见；列表页预览下次构建后更新。
+                    self._sessions.pop(user_id, None)
+                    return event.plain_result(
+                        "已添加到相册「{}」：{} 张照片。\n照片在详情页即时可见（列表页预览将在下次构建后更新）。".format(
+                            album_name, len(session.images)
+                        )
+                    )
+                md = build_album_md(album_name, album_folder, now)
+                path = "src/content/album/{}.md".format(clean_name)
+                link = "/album/{}".format(clean_name)
             else:
                 lat, lng = await self._geocode(
                     session.meta.get("province", "") + session.meta.get("city", "")
@@ -476,20 +553,33 @@ class BlogWriter(Star):
             "发布成功 ✅\n\n文件：{}\n博客：https://blog.tsh520.cn{}".format(final_path, link)
         )
 
-    # ---------- 图片 ----------
+    # ---------- 图片/视频 ----------
 
     _IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp", ".heic")
+    _VIDEO_EXTS = (".mp4", ".mov", ".m4v", ".webm")
+    _MEDIA_EXTS = _IMAGE_EXTS + _VIDEO_EXTS
 
-    def _extract_images(self, event: AstrMessageEvent) -> List[str]:
-        """提取图片。优先远程 URL，否则用本地文件路径（个人微信适配器会下载到 data/temp）。
+    @staticmethod
+    def _media_size_limit(ref: str) -> int:
+        """按扩展名选大小上限：视频 100MB，图片 20MB。"""
+        return MAX_VIDEO_SIZE if ref.lower().split("?")[0].endswith((".mp4", ".mov", ".m4v", ".webm")) else MAX_IMAGE_SIZE
 
-        防御式匹配：不依赖组件具体类型，兼容 Image 组件及带图片特征字段的其他组件。
+    def _extract_images(self, event: AstrMessageEvent, allow_video: bool = False) -> List[str]:
+        """提取图片（allow_video 时含视频）。优先远程 URL，否则用本地文件路径
+        （个人微信适配器会把图片/视频下载到 data/temp）。
+
+        防御式匹配：不依赖组件具体类型，兼容 Image/Video 组件及带媒体特征字段的其他组件。
         """
+        exts = self._MEDIA_EXTS if allow_video else self._IMAGE_EXTS
         urls = []
         try:
             for comp in event.get_messages():
                 comp_type = str(getattr(comp, "type", "") or "").lower()
                 is_image_type = isinstance(comp, Image) or comp_type in ("image", "img")
+                is_video_type = allow_video and (
+                    (Video is not None and isinstance(comp, Video)) or comp_type in ("video",)
+                )
+                is_media_type = is_image_type or is_video_type
                 candidates = []
                 for attr in ("url", "file", "path", "src"):
                     v = str(getattr(comp, attr, "") or "").strip()
@@ -499,10 +589,10 @@ class BlogWriter(Star):
                     continue
                 picked = candidates[0]
                 if picked.startswith("http"):
-                    if is_image_type or any(picked.lower().endswith(e) for e in self._IMAGE_EXTS):
+                    if is_media_type or any(picked.lower().endswith(e) for e in exts):
                         urls.append(picked)
                         continue
-                elif is_image_type or any(picked.lower().endswith(e) for e in self._IMAGE_EXTS):
+                elif is_media_type or any(picked.lower().endswith(e) for e in exts):
                     urls.append(picked)
         except Exception as e:
             logger.warning("BlogWriter 提取图片失败: {}".format(e))
@@ -519,8 +609,8 @@ class BlogWriter(Star):
             if not p.is_file():
                 logger.warning("BlogWriter 本地图片不存在: {}".format(ref))
                 return None
-            if p.stat().st_size > MAX_IMAGE_SIZE:
-                logger.warning("BlogWriter 图片超过 20MB，跳过: {}".format(ref))
+            if p.stat().st_size > self._media_size_limit(ref):
+                logger.warning("BlogWriter 本地媒体超过大小上限，跳过: {}".format(ref))
                 return None
             return p.read_bytes()
         except Exception as e:
@@ -534,8 +624,8 @@ class BlogWriter(Star):
                 if resp.status_code >= 400:
                     logger.warning("BlogWriter 下载图片 HTTP {}: {}".format(resp.status_code, url))
                     return None
-                if len(resp.content) > MAX_IMAGE_SIZE:
-                    logger.warning("BlogWriter 图片超过 20MB，跳过: {}".format(url))
+                if len(resp.content) > self._media_size_limit(url):
+                    logger.warning("BlogWriter 媒体超过大小上限，跳过: {}".format(url))
                     return None
                 return resp.content
             except Exception as e:
@@ -679,6 +769,68 @@ class BlogWriter(Star):
             logger.warning("BlogWriter: 列目录异常: %s", e)
             return 1
 
+    async def _github_file_content(self, repo: str, path: str, branch: str, token: str) -> Optional[str]:
+        """读取仓库文件文本内容（Accept: raw）。失败返回 None。"""
+        headers = {
+            "Authorization": "Bearer " + token,
+            "Accept": "application/vnd.github.raw",
+            "X-GitHub-Api-Version": "2022-11-28",
+        }
+        try:
+            resp = await self._get_client().get(github_base(repo, path, branch), headers=headers)
+            if resp.status_code == 200:
+                return resp.text
+            logger.warning("BlogWriter 读取文件失败 HTTP %s: %s", resp.status_code, path)
+        except Exception as e:
+            logger.warning("BlogWriter 读取文件异常: %s (%s)", e, path)
+        return None
+
+    async def _album_index(self, repo: str, branch: str, token: str) -> Optional[Dict[str, Dict[str, str]]]:
+        """列出 src/content/album 目录并解析每个文件的 title/imgbedFolder。
+
+        返回 {"titles": {title: folder}, "files": {文件名: folder}}；
+        目录不存在（404）→ 空索引；网络失败 → None。
+        """
+        import json as _json
+
+        url = "https://api.github.com/repos/{}/contents/src/content/album?ref={}".format(
+            repo, urllib.parse.quote(branch)
+        )
+        headers = {
+            "Authorization": "Bearer " + token,
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+        }
+        try:
+            resp = await self._get_client().get(url, headers=headers)
+            if resp.status_code == 404:
+                return {"titles": {}, "files": {}}
+            if resp.status_code != 200:
+                logger.warning("BlogWriter: 相册目录列出失败 HTTP %s", resp.status_code)
+                return None
+            items = _json.loads(resp.text)
+            titles: Dict[str, str] = {}
+            files: Dict[str, str] = {}
+            for item in items:
+                if not isinstance(item, dict) or item.get("type") != "file":
+                    continue
+                name = str(item.get("name") or "")
+                if not name.lower().endswith((".md", ".mdx", ".json")):
+                    continue
+                content = await self._github_file_content(
+                    repo, "src/content/album/" + name, branch, token
+                )
+                if content is None:
+                    continue
+                title, folder = parse_album_frontmatter(content)
+                if title:
+                    titles[title.strip()] = folder.strip()
+                files[name] = folder.strip()
+            return {"titles": titles, "files": files}
+        except Exception as e:
+            logger.warning("BlogWriter: 相册目录解析异常: %s", e)
+            return None
+
     async def _github_put(self, repo: str, path: str, md: str, token: str, branch: str) -> Tuple[bool, str]:
         body = build_github_put_body("blog: 通过 AstrBot 发布 {}".format(path), md.encode("utf-8"), branch)
         url = github_put_url(repo, path)
@@ -703,12 +855,15 @@ class BlogWriter(Star):
     # ---------- 微信媒体兜底下载（绕开适配器 aiohttp 的 CDN TLS 握手失败） ----------
 
     _WX_IMAGE_ITEM_TYPE = "2"
+    _WX_VIDEO_ITEM_TYPE = "5"
 
-    def _extract_wx_raw_media(self, event: AstrMessageEvent) -> List[Tuple[str, str, str]]:
-        """从 event.message_obj.raw_message 提取 (encrypt_query_param, aeskey_hex, aes_key_b64)。
+    def _extract_wx_raw_media(self, event: AstrMessageEvent, allow_video: bool = False) -> List[Tuple[str, str, str, str]]:
+        """从 event.message_obj.raw_message 提取 (encrypt_query_param, aeskey_hex, aes_key_b64, kind)。
 
         结构对齐 astrbot/core/platform/sources/weixin_oc/weixin_oc_adapter.py 的
-        _resolve_inbound_media_component：item.type==2 为图片，参数在 image_item.media 中。
+        _resolve_inbound_media_component：item.type==2 为图片（image_item），
+        type==5 为视频（video_item，只有 media.aes_key、无 aeskey 字段）。
+        kind ∈ {"image", "video"}。
         """
         raw = getattr(getattr(event, "message_obj", None), "raw_message", None)
         if not isinstance(raw, dict):
@@ -718,15 +873,20 @@ class BlogWriter(Star):
             try:
                 if not isinstance(item, dict):
                     continue
-                if str(item.get("type")) != self._WX_IMAGE_ITEM_TYPE:
+                itype = str(item.get("type"))
+                if itype == self._WX_IMAGE_ITEM_TYPE:
+                    key, kind = "image_item", "image"
+                elif itype == self._WX_VIDEO_ITEM_TYPE and allow_video:
+                    key, kind = "video_item", "video"
+                else:
                     continue
-                image_item = item.get("image_item") or {}
-                media = image_item.get("media") or {}
+                media_item = item.get(key) or {}
+                media = media_item.get("media") or {}
                 enc = str(media.get("encrypt_query_param") or "").strip()
-                aes_hex = str(image_item.get("aeskey") or "").strip()
+                aes_hex = str(media_item.get("aeskey") or "").strip()
                 aes_b64 = str(media.get("aes_key") or "").strip()
                 if enc and (aes_hex or aes_b64):
-                    out.append((enc, aes_hex, aes_b64))
+                    out.append((enc, aes_hex, aes_b64, kind))
             except Exception as e:
                 logger.warning("BlogWriter: 解析 raw_message 媒体项失败: %s", e)
         return out
@@ -793,13 +953,13 @@ class BlogWriter(Star):
 
     @staticmethod
     def _has_image_magic(data: bytes) -> bool:
-        """图片魔数校验：JPEG/PNG/GIF/WebP/BMP。"""
+        """图片魔数校验：JPEG/PNG/GIF/WebP/BMP；顺带兼容 mp4（偏移 4 处 ftyp）。"""
         if not data:
             return False
         return any(
             data.startswith(m)
             for m in (b"\xff\xd8", b"\x89PNG", b"GIF8", b"RIFF", b"BM")
-        )
+        ) or data[4:8] == b"ftyp"
 
     @staticmethod
     def _decrypt_wx_media(data: bytes, aes_hex: str, aes_b64: str) -> Optional[bytes]:
@@ -834,10 +994,11 @@ class BlogWriter(Star):
     def _help_text(self) -> str:
         return (
             "BlogWriter 使用说明：\n"
-            "/动态 内容 #标签 —— 发动态（可附图片、自定义标签）\n"
+            "/动态 内容 #标签 —— 发动态（可附图片/GIF/视频、自定义标签）\n"
             "/笔记 [分类] 标题 —— 发笔记，正文随后发\n"
             "/足迹 省 地点 体验 #标签 —— 发足迹，坐标自动获取\n"
             "/友链 —— 发友链（站点名称/描述/链接/头像链接，逐行发送自动识别）\n"
+            "/相册 相册名 —— 发相册照片（随后直接发图，多张可多次发送）\n"
             "/发布 —— 结束并提交当前会话\n"
             "/取消 —— 放弃当前会话\n"
             "/状态 —— 查看当前会话"

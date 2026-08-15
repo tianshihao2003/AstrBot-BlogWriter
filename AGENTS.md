@@ -1,0 +1,99 @@
+# AGENTS.md
+
+AstrBot BlogWriter 插件：通过微信（weixin_oc）对话把内容发布到静态博客仓库 `tianshihao2003/dumplingandcakeblog`（Firefly Astro）。内容类型：动态（moments）、笔记（notebooks）、足迹（places）、友链（friends）、相册（album）。流程：图片上传 CloudFlare-ImgBed → 生成 markdown（对齐博客 zod schema）→ GitHub API 提交 main 分支 → Actions 构建 + EdgeOne Pages 部署。
+
+先读文档：`DESIGN.md`（已批准的完整设计，含协议与规则）、`README.md`（安装/配置/使用）。
+
+## 博客仓库（本机克隆）
+
+- **`E:\GithubProgect\MyRunProject\dumplingandcakeblog`** —— 插件发布的目标仓库本机克隆，改插件前先看它有没有新改动。
+- 插件本仓库（当前目录）位于博客工作树内的 `plug-in/AstrBot/AstrBot BlogWriter/`（`plug-in/` 下按框架分组，未来可放其他插件），是**独立 git 仓库**；博客 `.gitignore` 已忽略 `/plug-in/`，两边互不提交。
+- 博客的权威约定在博客仓库内：`src/content.config.ts`（各 collection 的 zod schema）、`CLAUDE.md`（工程规范）、`AGENTS.md`（入口）。插件生成的 frontmatter 必须与 zod schema 对齐。
+- 博客图床目录惯例（2026-08-13 统一）：插件上传的图片全部进 `blog/moments`；相册 `blog/album/<相册名>`；bangumi `blog/bangumi`。
+- 博客已去掉动态每条的自定义 `author`/`avatar`（schema 提供默认值 `团子和蛋糕`、`/assets/ziyuan/tx.webp`）——插件不得再写这两个字段；`_conf_schema.json` 中已移除对应配置项（旧配置残留键会被静默忽略）。
+
+## 文件与分层（硬性边界）
+
+- `blog_writer_core.py` —— **纯逻辑层**：命令解析、markdown/YAML 生成、请求构造、响应解析。**禁止 import astrbot**，必须可独立单测。
+- `main.py` —— AstrBot 粘合层：`BlogWriter(Star)` 类、`on_message` 路由、会话状态机、所有外部网络调用（图床/高德/GitHub/微信图片下载）。
+- `_conf_schema.json` —— WebUI 配置面板 schema；新配置项必须同时在此声明并在 `main.py` 的 `_cfg()` 中读取（配置经 `__init__(self, context, config)` 注入）。
+- `metadata.yaml` —— 插件元数据：`name` 必须带 `astrbot_plugin_` 前缀，`version` 带 `v` 前缀，`astrbot_version: ">=4.22.0"`。
+- `tests/test_core.py`（纯逻辑单测）+ `tests/test_smoke.py`（stub astrbot 模块的集成冒烟测试，`sys.path.insert` 后 import main）。
+
+## 构建 / 测试
+
+无构建步骤；无 lint/format 配置。
+
+```bash
+pip install httpx pycryptodome
+python -m unittest discover -s tests
+```
+
+修改逻辑层时跑 test_core；改动 main.py 后必须跑 test_smoke（内部 stub `astrbot`，不含真实网络）。
+
+## 发布打包规范（每次交付必做）
+
+- 打包前必须全量测试通过（`python -m unittest discover -s tests`）。
+- **只打包 5 个文件**：`main.py`、`blog_writer_core.py`、`metadata.yaml`、`README.md`、`_conf_schema.json`。不含 `tests/`、`AGENTS.md`、`DESIGN.md`。
+- **输出位置**：插件目录内的 `打包/` 子目录（`E:\GithubProgect\MyRunProject\dumplingandcakeblog\plug-in\AstrBot\AstrBot BlogWriter\打包\`）。压缩包一律收进本插件的 `打包/`，不散放在 `plug-in/` 根下。
+- **命名**：`AstrBot-BlogWriter-vX.Y.Z.zip`，版本号在上一版 zip 文件名基础上 +1（历史：…v1.0.16 → v1.0.17 → v1.0.18）。
+- **zip 数量上限**：`打包/` 目录最多保留 **10 个**；每次打出新 zip 后，立即删除最旧的一个（旧版本号靠前的最先删）。
+- **不改内部版本字段**：`metadata.yaml` 与 `main.py` 的 `@register` 里的版本历史上一直保持 `v1.0.0`，只有 zip 文件名与 git 提交信息递增，打包时不要动它们。
+- 打包用 Python（Windows Git Bash 无 zip 命令），把版本号替换成新版：
+
+```python
+python - <<'EOF'
+import zipfile, os
+src = os.getcwd()
+out_dir = os.path.join(src, "打包")
+os.makedirs(out_dir, exist_ok=True)
+out = os.path.join(out_dir, "AstrBot-BlogWriter-v1.0.19.zip")
+files = ["main.py", "blog_writer_core.py", "metadata.yaml", "README.md", "_conf_schema.json"]
+with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as z:
+    for f in files:
+        z.write(os.path.join(src, f), f)
+EOF
+```
+
+- 交付 zip 后如需 git 提交，沿用历史格式：`feat: AstrBot BlogWriter 插件 vX.Y.Z`。
+
+## 发布前验收清单（自动化测试无法覆盖真实外部依赖，发版后需在服务器人工验收）
+
+本地测试桩掉了图床/GitHub/高德/微信适配器，只验证逻辑与流程。真实环境验收用白名单账号依次发送，逐项确认：
+
+1. `/动态 测试` + 发图 + `/发布` → 博客出现动态：**无 `author`/`avatar` 字段**，图片 URL 为 `blog/moments`
+2. `/足迹 陕西 华山 测试` + 发图 + `/发布` → 足迹照片 URL 为 **`blog/moments`**（不再单独 `places`）
+3. `/笔记 测试 标题` + 正文 + `/发布`、`/友链` → 键值对 → `/发布` → 正常发布
+4. `/相册 验收相册` + 发图 + `/发布` → 博客仓库出现 `src/content/album/验收相册.md`（仅 title/date/imgbedFolder），图床出现 `blog/album/验收相册/` 目录；⚠️ 重点验证**图床中文目录**上传解码正常；Actions 构建后访问 `https://blog.tsh520.cn/album/验收相册/` 能看到照片
+5. 再次 `/相册 验收相册` + 新图 + `/发布` → **不产生新的 md 提交**（追加模式），详情页新图即时可见
+6. `/相册 测试相册` + 发图 + `/发布` → 按 **title 判定**追加到已有「测试相册」（xiangce1.md）自己的目录 `blog/album/相册1`，且不新建文件（重复相册 bug 的回归验证）
+7. `/动态 视频测试` + 发一段视频 + `/发布` → 动态 md 的 `images:` 出现 `.mp4` 链接；`/动态 动图测试` + 发 GIF → 出现 `.gif` 链接
+
+任何一步不符合预期，看 AstrBot 控制台日志（插件全程写 logger 日志）定位排查。
+
+## AstrBot API 约束（改 main.py 前必看）
+
+- 消息监听：`@filter.event_message_type(filter.EventMessageType.ALL)`；旧 API `on_decorating_message_type(MessageType.ALL)` 已移除，勿用。
+- 配置：`__init__(self, context, config)` + `AstrBotConfig`；`get_config()` 已过时。
+- 网络：用 `httpx`（AstrBot 内置），**不要用 requests**；超时 15s 连接 + 30s 读取。
+- 回复：`yield event.plain_result(...)`；日志用 `astrbot.api.logger`。
+- `main.py` 对 core 的 import 有双路径兼容：先相对导入 `.blog_writer_core`，失败（非包形式加载）回退顶层导入 `blog_writer_core` —— 新增 core 符号时两处 import 列表都要加。
+- 平台能力探测用 `hasattr`（如 `event.get_file_url()`），不可直接调用假定存在。
+
+## 业务规则与陷阱（对博客仓库有真实影响）
+
+- **发布原子性**：任一图片上传失败、或足迹高德地理编码失败 → 中止整个 `/发布`，绝不产生半成品提交。
+- 文件名：动态/足迹 `YYYY-MM-DD`，笔记 `2026年8月8日`（中文、**不补零**）；冲突依次加 `-1`…`-10` 后缀。
+- YAML 边界（博客 zod schema 校验，改 md 生成时必须保持）：时间不加引号、**纯数字标签必须加引号**（如 `"2026"`）、URL 裸写；动态 `id` = `ext-` + 毫秒时间戳。
+- 图片：微信不能图文同发 → 会话式收集，先发命令再发图，`/发布` 统一提交；图片落位：动态/笔记追加正文 `![](url)`，足迹进 `photos` 列表。
+- 微信 CDN 兜底：适配器 aiohttp 被 TLS 风控拒绝时改 curl 下载 + AES 解密，依赖服务器 `curl` 和 `pycryptodome`（延迟 import）。
+- 会话：30 分钟超时、每用户同时仅一个会话、`allow_users` 白名单（空 = 全部拒绝）；**非白名单或无关消息必须静默放行**，不得抢占其他插件/AI。
+- 图床上传目录：动态/笔记/足迹照片统一用 `imgbed_upload_folder`（默认 `blog/moments`，与博客惯例一致）；友链无图片。
+- 相册：`/相册 相册名` 会话只收图片；**存在性按 title/文件名判断**（列出 `src/content/album/` 解析每个文件的 title/imgbedFolder，博客文件名与 title 不一定相同，如 `xiangce1.md` 的 title 是「测试相册」）；命中则只传图不写文件、照片上传到**命中相册自己的 imgbedFolder**（不触发构建，博客详情页运行时从图床动态拉图）；未命中才创建仅含 `title`/`date`/`imgbedFolder` 的 md，不生成 `-1` 后缀。
+- 动态媒体：GIF 走 Image 组件（`.gif` 已在白名单）；视频走 `Video` 组件（微信适配器下载到本地 `.mp4`），**仅动态会话接收**（`_extract_images(allow_video=...)`，笔记/足迹/相册仍只收图片），URL 与图片一样进 `images` 数组；大小上限视频 100MB/图片 20MB；微信 raw_message type 5（video_item）兜底 ref 带 `.mp4` 后缀。
+- 所有失败路径返回明确中文错误信息并写日志。
+
+## 环境
+
+- 开发机为 Windows + Git Bash；插件实际运行在服务器上的 AstrBot 框架内，本地无法端到端运行（无 AstrBot 运行时），验证靠单测 + 冒烟测试。
+- 本仓库是插件仓库，无 CI；博客仓库的 Actions 构建在提交后由 GitHub 自动触发，无需 webhook。

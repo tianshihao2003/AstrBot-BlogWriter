@@ -6,13 +6,16 @@
 - **笔记（notebooks）** —— 分类 + 标题 + 正文，多段自动拼接
 - **足迹（places）** —— 输入地名，坐标由高德地理编码自动获取
 - **友链（friends）** —— 键值对文本自动识别字段，一键上链
+- **相册（album）** —— 报个相册名直接发图，图片进图床 `blog/album/<相册名>`，博客动态加载
 
 图片自动上传 CloudFlare-ImgBed 图床，内容生成 markdown（严格对齐博客 zod schema）后通过 GitHub API 提交 main 分支，触发 Actions 构建与 EdgeOne Pages 自动部署，全链路零人工干预。
 
 ## 功能特性
 
-- ✅ 微信对话直接发布动态 / 笔记 / 足迹 / 友链
-- ✅ 图片自动上传图床（`uploadFolder` 按内容分目录：动态 → `blog/moments`，足迹 → `places`）
+- ✅ 微信对话直接发布动态 / 笔记 / 足迹 / 友链 / 相册
+- ✅ 动态支持图片、动图 GIF 与视频：微信视频自动下载、上传图床，URL 进动态 `images` 数组（视频仅动态支持）
+- ✅ 相册发布：新相册自动建 `src/content/album/<名>.md` 触发构建；已有相册（按标题/文件名判断）只传图不写文件，照片进命中相册自己的图床目录
+- ✅ 图片自动上传图床（统一上传到 `imgbed_upload_folder`，默认 `blog/moments`，与博客图床目录惯例一致）
 - ✅ 足迹坐标自动获取（高德地理编码 API）
 - ✅ 自定义标签：`/动态 内容 #日常 #2026`，自动合并默认标签（纯数字标签自动加引号防 schema 校验失败）
 - ✅ 友链字段智能识别：兼容中英文键名（站点名称/名称/name/博客名…）、冒号/单空格分隔、乱序、缺字段提示
@@ -23,7 +26,7 @@
 
 ## 安装
 
-1. 将 `main.py`、`metadata.yaml`、`blog_writer_core.py`、`_conf_schema.json` 打包为 zip
+1. 将 `main.py`、`blog_writer_core.py`、`metadata.yaml`、`README.md`、`_conf_schema.json` 打包为 `AstrBot-BlogWriter-vX.Y.Z.zip`（打包规范见 `AGENTS.md`）
 2. AstrBot 后台 → 插件管理 → 安装插件 → 上传 zip
 3. 在 WebUI 插件的「配置」面板中填写配置项（见下）
 
@@ -38,10 +41,10 @@
 | github_branch | 目标分支，默认 `main` |
 | imgbed_upload_url | 图床上传地址，默认 `https://img.tsh520.cn/upload` |
 | imgbed_token | 图床 API Token（`Authorization: Bearer` 认证） |
-| imgbed_upload_folder | 动态/笔记图片上传目录，默认 `blog/moments`（足迹固定上传到 `places`） |
+| imgbed_upload_folder | 图片上传目录（动态/笔记/足迹照片统一），默认 `blog/moments` |
+| album_folder_prefix | 相册图片目录前缀，默认 `blog/album`（实际目录 = 前缀 + 相册名） |
 | wx_cdn_base_url | 微信媒体 CDN 地址（图片下载兜底用），默认 `https://novac2c.cdn.weixin.qq.com/c2c` |
 | amap_key | 高德 Web 服务 Key（足迹坐标用）；留空读环境变量 `AMAP_KEY` |
-| author / avatar | 动态作者与头像，默认 `团子和蛋糕` / `/assets/ziyuan/tx.webp` |
 | moment_tags / place_tags | 动态/足迹默认标签，默认 `["日常"]` / `["旅游"]` |
 | default_note_dir | 笔记默认分类目录，默认 `日常随笔` |
 | friend_default_avatar | 友链默认头像（未提供头像链接时），默认 `/assets/ziyuan/tx.webp` |
@@ -54,10 +57,11 @@
 
 | 命令 | 说明 |
 |---|---|
-| `/动态 今天去了公园 #日常` | 创建动态会话，可直接发图片（可多发） |
+| `/动态 今天去了公园 #日常` | 创建动态会话，可发图片 / GIF / 视频（可多发） |
 | `/笔记 日常随笔 标题` | 创建笔记会话，正文由后续文本消息追加，可发图片 |
 | `/足迹 陕西 华阴市华山 去找宝宝了 #旅游` | 创建足迹会话，坐标自动获取，可发照片 |
 | `/友链` | 创建友链会话，逐行发送键值对信息自动识别 |
+| `/相册 情侣头像` | 创建相册会话，直接发图片（可多发）；相册已存在（按标题/文件名判断）则只追加照片 |
 | `/发布` | 结束会话：上传图床 → 生成 markdown → GitHub 提交 |
 | `/取消` | 放弃当前会话 |
 | `/状态` | 查看当前会话 |
@@ -87,6 +91,9 @@
 - 足迹坐标获取失败会中止发布（避免产生无坐标数据）
 - 任一图片上传失败会中止整个发布，不会产生半成品提交
 - 微信图片下载兜底依赖服务器 `curl`（需可用）
+- 动态的作者/头像由博客端统一配置（`content.config.ts` 的 schema 默认值），插件不再按条写入 `author`/`avatar` 字段
+- 相册追加模式不触发博客构建：详情页照片即时可见，列表页预览图在下次构建后刷新
+- 相册按标题判断是否存在（文件名与标题不一定相同，如 `xiangce1.md` 的标题是「测试相册」）；追加照片会上传到命中相册自己的图床目录
 
 ## 测试
 

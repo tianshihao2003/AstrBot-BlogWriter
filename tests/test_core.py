@@ -11,6 +11,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from blog_writer_core import (  # noqa: E402
     SESSION_TIMEOUT,
     Session,
+    build_album_md,
     build_amap_url,
     build_github_put_body,
     build_imgbed_upload,
@@ -26,6 +27,8 @@ from blog_writer_core import (  # noqa: E402
     moment_filename,
     next_friend_index,
     note_filename,
+    parse_album,
+    parse_album_frontmatter,
     parse_amap_response,
     parse_dynamic,
     parse_friend_text,
@@ -67,6 +70,34 @@ class TestParseMessage(unittest.TestCase):
         cmd, args, _ = parse_message("/笔记 日常随笔 我的标题")
         self.assertEqual(cmd, "笔记")
         self.assertEqual(args, ["日常随笔", "我的标题"])
+
+    def test_album_command(self):
+        cmd, args, _ = parse_message("/相册 情侣头像")
+        self.assertEqual(cmd, "相册")
+        self.assertEqual(args, ["情侣头像"])
+
+    def test_parse_album(self):
+        self.assertEqual(parse_album(["情侣头像"]), "情侣头像")
+        self.assertEqual(parse_album(["我的", "旅行"]), "我的 旅行")
+        self.assertEqual(parse_album([]), "")
+        self.assertEqual(parse_album(["  "]), "")
+
+    def test_parse_album_frontmatter(self):
+        # 常规：引号包裹的 imgbedFolder
+        md = '---\ntitle: "测试相册"\nimgbedFolder: "blog/album/相册1"\n---\n'
+        self.assertEqual(parse_album_frontmatter(md), ("测试相册", "blog/album/相册1"))
+        # 无引号
+        md2 = "---\ntitle: 情侣头像\ndate: 2026-08-13\nimgbedFolder: blog/album/情侣头像\n---\n"
+        self.assertEqual(parse_album_frontmatter(md2), ("情侣头像", "blog/album/情侣头像"))
+        # 缺字段
+        md3 = "---\ntitle: 只有标题\n---\n"
+        self.assertEqual(parse_album_frontmatter(md3), ("只有标题", ""))
+        # 空/无 frontmatter
+        self.assertEqual(parse_album_frontmatter(""), ("", ""))
+        self.assertEqual(parse_album_frontmatter("正文无 frontmatter"), ("", ""))
+        # title 值含冒号或特殊字符（键值行仅取第一个冒号后的内容）
+        md4 = '---\ntitle: "A: B"\n---\n'
+        self.assertEqual(parse_album_frontmatter(md4), ("A: B", ""))
 
 
 class TestParseArgs(unittest.TestCase):
@@ -152,7 +183,7 @@ class TestNaming(unittest.TestCase):
 
 class TestMarkdown(unittest.TestCase):
     def test_moment_md_structure(self):
-        md = build_moment_md("今天去了公园", ["https://img.tsh520.cn/file/a.jpg"], "团子和蛋糕", "/assets/ziyuan/tx.webp", ["日常"])
+        md = build_moment_md("今天去了公园", ["https://img.tsh520.cn/file/a.jpg"], ["日常"])
         lines = md.split("\n")
         self.assertEqual(lines[0], "---")
         self.assertTrue("---" in lines)
@@ -160,7 +191,9 @@ class TestMarkdown(unittest.TestCase):
         self.assertIn("published: 20", md)
         self.assertNotIn('"published"', md)
         self.assertNotIn("id: ext-", md)
-        self.assertIn("author: 团子和蛋糕", md)
+        # 2026-08-13 起博客不再按条写 author/avatar（schema 提供默认值）
+        self.assertNotIn("author:", md)
+        self.assertNotIn("avatar:", md)
         # 图片在 frontmatter 的 images 数组（URL 裸写，对齐现有风格），正文只有文字
         self.assertIn("images:", md)
         self.assertIn("  - https://img.tsh520.cn/file/a.jpg", md)
@@ -168,15 +201,18 @@ class TestMarkdown(unittest.TestCase):
         self.assertIn("今天去了公园", md)
         if yaml:
             fm = yaml.safe_load(md.split("---")[1])
-            self.assertEqual(fm["author"], "团子和蛋糕")
+            self.assertNotIn("author", fm)
+            self.assertNotIn("avatar", fm)
             self.assertEqual(fm["tags"], ["日常"])
             self.assertEqual(fm["images"], ["https://img.tsh520.cn/file/a.jpg"])
             self.assertNotIn("id", fm)
             self.assertIn("published", fm)
 
     def test_moment_md_no_images(self):
-        md = build_moment_md("纯文字动态", [], "团子和蛋糕", "/assets/ziyuan/tx.webp", ["日常"])
+        md = build_moment_md("纯文字动态", [], ["日常"])
         self.assertNotIn("images:", md)
+        self.assertNotIn("author:", md)
+        self.assertNotIn("avatar:", md)
         if yaml:
             fm = yaml.safe_load(md.split("---")[1])
             self.assertEqual(fm.get("images"), None)
@@ -208,6 +244,21 @@ class TestMarkdown(unittest.TestCase):
         if yaml:
             fm = yaml.safe_load(md.split("---")[1])
             self.assertNotIn("experience", fm)
+
+    def test_album_md(self):
+        # 对齐博客相册图床化惯例（2026-08-13）：仅 title/date/imgbedFolder，无 photos 列表
+        md = build_album_md("情侣头像", "blog/album/情侣头像", datetime(2026, 8, 13))
+        self.assertIn("title: 情侣头像", md)
+        self.assertIn("date: 2026-08-13", md)
+        self.assertNotIn('"date"', md)
+        self.assertIn("imgbedFolder: blog/album/情侣头像", md)
+        self.assertNotIn("photos:", md)
+        if yaml:
+            fm = yaml.safe_load(md.split("---")[1])
+            self.assertEqual(fm["title"], "情侣头像")
+            self.assertEqual(fm["imgbedFolder"], "blog/album/情侣头像")
+            # js-yaml（Astro 用）按字符串解析；PyYAML 解析成 date 对象，两者皆可
+            self.assertTrue(fm["date"] == "2026-08-13" or fm["date"] == datetime(2026, 8, 13).date())
 
     def test_yaml_quoting(self):
         # 含特殊字符的标题必须被正确引用，YAML 可解析

@@ -2,6 +2,7 @@
 
 日期：2026-08-08
 状态：已批准（用户 2026-08-08 确认方案 A 全项 + 高德 API 取坐标）
+更新：2026-08-13 对齐博客改动 —— 动态不再按条写 author/avatar（博客 schema 提供默认值）；插件图片统一上传 `imgbed_upload_folder`（默认 `blog/moments`，足迹照片不再单独放 `places`）；新增相册发布（`/相册 相册名`，图片进 `blog/album/<相册名>`，已有相册只追加不重建）。同日追加：动态支持 GIF/视频（视频仅动态）；相册存在性改为按 title/文件名判断（文件名与 title 不一定相同，如 xiangce1.md 的 title 是「测试相册」）。
 
 ## 1. 目标
 
@@ -29,10 +30,11 @@
 
 | 命令 | 格式 | 行为 |
 |---|---|---|
-| /动态 | `/动态 今天去了公园` | 创建会话，可继续发图 |
+| /动态 | `/动态 今天去了公园` | 创建会话，可发图片/GIF/视频（可多发） |
 | /笔记 | `/笔记 日常随笔 标题` | 正文由后续文本消息追加，直到 /发布 |
 | /足迹 | `/足迹 陕西 华阴市华山 去找宝宝了` | 省 地点 体验；坐标由高德 geocode（省+地点）获取 |
-| 图片消息 | 无命令直接发 | 归入当前会话（仅在会话激活时消费） |
+| /相册 | `/相册 情侣头像` | 创建相册会话，图片传图床目录；按 title/文件名判断已存在则只追加照片 |
+| 图片消息 | 无命令直接发 | 归入当前会话（仅在会话激活时消费；视频仅动态会话接收） |
 | /发布 | `/发布` | 图床→md→GitHub 提交→回复结果 |
 | /取消 | `/取消` | 丢弃会话 |
 | /状态 | `/状态` | 查看会话状态 |
@@ -44,7 +46,7 @@
 - 非白名单用户一律拒绝（回复「无权限」）
 - 其他命令/普通消息不消费，放行给其他插件或 AI
 - 缺省规则：`/动态` 无正文 → 报错提示；`/笔记 标题`（一个参数）→ 分类用默认目录，标题=该参数；`/足迹` 参数不足 → 报错
-- 图片落位：动态/笔记 → 追加到正文末尾 `![](url)`；足迹 → photos 列表
+- 图片落位：动态 → frontmatter `images` 数组；笔记 → 正文末尾 `![](url)`；足迹 → photos 列表
 
 ## 4. 文件生成规则（对齐现有数据）
 
@@ -53,17 +55,16 @@
 ```yaml
 ---
 published: 2026-08-08 14:30:00   # 本地时间精确到秒
-author: 团子和蛋糕                 # 配置
-avatar: /assets/ziyuan/tx.webp   # 配置
-id: ext-1785175842726            # ext- + 毫秒时间戳
 tags:
   - 日常                          # 配置 moment_tags
+images:
+  - https://img.tsh520.cn/file/blog/moments/xxx.jpg
 ---
 
 正文文字
-
-![](https://img.tsh520.cn/file/xxx.jpg)
 ```
+
+> 2026-08-13 起不再写 `author`/`avatar`（博客 schema 已提供默认值 `团子和蛋糕`、`/assets/ziyuan/tx.webp`）。图片放 frontmatter `images` 数组，正文只放文字。
 
 ### 笔记 → `src/content/life/notebooks/<分类>/2026年8月8日[-N].md`
 
@@ -90,7 +91,7 @@ visitCount: 1
 lat: 34.477861
 lng: 110.084789
 photos:
-  - "https://img.tsh520.cn/file/places/xxx.jpg"
+  - "https://img.tsh520.cn/file/blog/moments/xxx.jpg"
 tags:
   - 旅游
   - "2026"
@@ -98,6 +99,21 @@ tags:
 ```
 
 lat/lng 由高德 geocode（address = 省+地点）获取；解析失败则中止发布并报错（绝不发布无坐标足迹）。
+
+### 相册 → `src/content/album/<相册名>.md`
+
+```yaml
+---
+title: 情侣头像
+date: 2026-08-13
+imgbedFolder: blog/album/情侣头像
+---
+```
+
+- 照片不进 md：上传到图床目录，博客详情页运行时动态拉图（对齐 2026-08-13 博客相册全量图床化惯例）
+- **存在性判断**：列出 `src/content/album/` 并解析每个文件的 title/imgbedFolder；`title == 相册名` 或存在 `<相册名>.md` → 追加模式，照片上传到**命中相册自己的 imgbedFolder**（如「测试相册」→ `blog/album/相册1`）；否则新建（文件名 = 清洗后的相册名，不生成 `-1` 后缀）
+- 追加模式只传图、不写文件、不触发构建（详情页即时可见，列表页预览下次构建后刷新）
+- 相册会话只收图片，收到文字仅提示；无图片时拒绝发布
 
 ## 5. GitHub 提交
 
@@ -115,6 +131,8 @@ lat/lng 由高德 geocode（address = 省+地点）获取；解析失败则中�
   3. 平台 file id → 尝试 `event.get_file_url()`（能力探测，无则报错提示）
 - 下载用标准库（urllib），不引入额外依赖
 - 上传到图床：multipart `file` 字段 + `API_TOKEN` header，响应 `{"code":200,"data":{"url":"..."}}` 校验
+- 动态会话还接收 GIF（Image 组件 `.gif`，微信适配器自动下载）与视频（`Video` 组件，本地 `.mp4`）；视频仅动态会话接收，URL 与图片一样进 frontmatter `images` 数组
+- 视频扩展名白名单 `.mp4/.mov/.m4v/.webm`；大小上限视频 100MB、图片 20MB；微信 raw_message type 5（video_item）与图片同走 curl + AES 解密兜底，ref 带 `.mp4` 后缀
 - 任一张图上传失败 → 中止整个发布，回复错误，不写 md（绝不产生半成品提交）
 
 ## 7. 配置项（`_conf_schema.json`，WebUI 配置面板展示）
@@ -124,11 +142,11 @@ lat/lng 由高德 geocode（address = 省+地点）获取；解析失败则中�
 | github_token | fine-grained PAT（Contents 读写，仅限博客仓库） | 空 |
 | github_repo | `owner/repo` | tianshihao2003/dumplingandcakeblog |
 | github_branch | 目标分支 | main |
-| imgbed_upload_url | 图床上传地址 | https://img.tsh520.cn/file |
+| imgbed_upload_url | 图床上传地址 | https://img.tsh520.cn/upload |
 | imgbed_token | 图床 API_TOKEN | 空 |
+| imgbed_upload_folder | 图片上传目录（动态/笔记/足迹照片统一，2026-08-13 起） | blog/moments |
+| album_folder_prefix | 相册图片目录前缀（实际目录 = 前缀 + 相册名） | blog/album |
 | amap_key | 高德 Web 服务 key | 空 |
-| author | 动态作者 | 团子和蛋糕 |
-| avatar | 动态头像 | /assets/ziyuan/tx.webp |
 | moment_tags | 动态默认 tags | ["日常"] |
 | place_tags | 足迹默认 tags | ["旅游"] |
 | default_note_dir | 笔记默认分类目录 | 日常随笔 |
@@ -155,7 +173,7 @@ lat/lng 由高德 geocode（address = 省+地点）获取；解析失败则中�
 
 ## 9. 交付
 
-- `E:\GithubProgect\MyRunProject\plug-in\AstrBot\`：
+- 本仓库位于 `E:\GithubProgect\MyRunProject\dumplingandcakeblog\plug-in\AstrBot\AstrBot BlogWriter\`（`plug-in/` 下按框架分组）；打包 zip 输出到本插件目录内的 `打包/` 子目录（最多保留 10 个，打新的删最旧的）：
   - `main.py`（AstrBot 粘合层：Star 类、命令路由、会话、外部调用）
   - `blog_writer_core.py`（纯逻辑：解析、md 生成、请求构造）
   - `_conf_schema.json`（配置 Schema，WebUI 自动渲染）
