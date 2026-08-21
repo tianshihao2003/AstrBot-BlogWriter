@@ -804,6 +804,9 @@ _SCHEDULE_REPEATS = ["每天", "每日", "每周", "每月", "每年"]
 
 
 def _parse_schedule_date(text: str, now: datetime) -> datetime:
+    # 相对时间“2分钟后/3小时后”等视为今天，避免被误判为全天
+    if re.search(r"(\d+\s*(?:分钟|分|小时|时|天|周)\s*后|半小时后)", text):
+        return now.replace(hour=0, minute=0, second=0, microsecond=0)
     m = re.search(r"(今天|明天|昨天|后天|\d{4}-\d{2}-\d{2}|\d{1,2}月\d{1,2}日)", text)
     base = now.replace(hour=0, minute=0, second=0, microsecond=0)
     if not m:
@@ -834,8 +837,37 @@ def _parse_schedule_date(text: str, now: datetime) -> datetime:
     return base
 
 
-def _parse_schedule_time(text: str, base_date: datetime) -> Tuple[datetime, bool]:
-    """解析时间，返回 (datetime, has_time)"""
+def _parse_schedule_time(text: str, base_date: datetime, now: datetime = None) -> Tuple[datetime, bool]:
+    """解析时间，返回 (datetime, has_time)。支持绝对时间与相对时间 2分钟后/半小时后"""
+    # 相对时间优先：2分钟后 / 3小时后 / 半小时后 等，基准用传入的 now（保持测试可控）
+    _now = now or datetime.now()
+    m_rel = re.search(r"(\d+)\s*分钟后", text)
+    if m_rel:
+        try:
+            mins = int(m_rel.group(1))
+            dt = _now + timedelta(minutes=mins)
+            return dt.replace(second=0, microsecond=0), True
+        except ValueError:
+            pass
+    m_rel2 = re.search(r"(\d+)\s*小时后", text)
+    if m_rel2:
+        try:
+            hours = int(m_rel2.group(1))
+            dt = _now + timedelta(hours=hours)
+            return dt.replace(second=0, microsecond=0), True
+        except ValueError:
+            pass
+    m_rel3 = re.search(r"(\d+)\s*秒后", text)
+    if m_rel3:
+        try:
+            secs = int(m_rel3.group(1))
+            dt = _now + timedelta(seconds=secs)
+            return dt.replace(second=0, microsecond=0), True
+        except ValueError:
+            pass
+    if "半小时后" in text or "半个小时后" in text:
+        dt = _now + timedelta(minutes=30)
+        return dt.replace(second=0, microsecond=0), True
     # 匹配 (\d{1,2}[:点]\d{0,2}) 兼容冒号与中文点
     m = re.search(r"(\d{1,2})\s*[:：点]\s*(\d{1,2})?", text)
     has_time = False
@@ -935,7 +967,7 @@ def parse_schedule(text: str, now=None) -> Tuple[Optional[Dict], str]:
         return None, "内容为空"
 
     base_date = _parse_schedule_date(raw, now)
-    dt, has_time = _parse_schedule_time(raw, base_date)
+    dt, has_time = _parse_schedule_time(raw, base_date, now)
     # 若未解析到时间且文本中无时间关键词，则视为全天事件
     all_day = not has_time
 
@@ -946,6 +978,11 @@ def parse_schedule(text: str, now=None) -> Tuple[Optional[Dict], str]:
 
     # 标题提取：去除已识别片段
     cleaned = raw
+    # 去除相对时间
+    cleaned = re.sub(r"\d+\s*分钟后", "", cleaned)
+    cleaned = re.sub(r"\d+\s*小时后", "", cleaned)
+    cleaned = re.sub(r"\d+\s*秒后", "", cleaned)
+    cleaned = re.sub(r"半小时后|半个小时后", "", cleaned)
     # 去除日期
     cleaned = re.sub(r"(今天|明天|昨天|后天|\d{4}-\d{2}-\d{2}|\d{1,2}月\d{1,2}日)", "", cleaned)
     # 去除时间段关键词下午等 + 时间本身

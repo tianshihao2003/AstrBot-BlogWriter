@@ -167,8 +167,11 @@ SCHEDULE_PROMPT = (
     "你是日程信息抽取助手，只输出 JSON，不要解释。\n"
     "字段：title(标题), date(YYYY-MM-DD HH:MM:SS 或 YYYY-MM-DD), allDay(bool), priority(none/low/medium/high), location(地点), repeat(每天/每周/每月/每年或空), remind_before(整数分钟)\n"
     "优先级白名单: none、low、medium、high（高优=high，中优=medium，低优=low）\n"
+    "时间基准：{now}\n"
     "示例输入：明天下午3点高优在会议室A开周会 每周重复 提前15分钟\n"
     '示例输出：{"title":"周会","date":"2026-08-22 15:00:00","allDay":false,"priority":"high","location":"会议室A","repeat":"每周","remind_before":15}\n'
+    "示例输入：2分钟后在会议室A开周会 高优 提前1分钟\n"
+    '示例输出：{"title":"周会","date":"{now_plus_2m}","allDay":false,"priority":"high","location":"会议室A","repeat":"","remind_before":1}\n'
     "示例输入：明天上午9点开会\n"
     '示例输出：{"title":"开会","date":"2026-08-22 09:00:00","allDay":false,"priority":"none","location":"","repeat":"","remind_before":10}\n'
     "未提及时间则 allDay=true，priority 默认 none，remind_before 默认 10。\n"
@@ -353,6 +356,14 @@ class BlogWriter(Star):
         if llm is None:
             return None
         prompt = BILL_PROMPT if kind == "bill" else SCHEDULE_PROMPT
+        # 动态填充时间基准，避免 LLM 看到字面量 {now}
+        if kind == "schedule":
+            try:
+                _now = datetime.now()
+                _now_plus_2m = (_now + timedelta(minutes=2)).strftime("%Y-%m-%d %H:%M:%S")
+                prompt = prompt.format(now=_now.strftime("%Y-%m-%d %H:%M:%S"), now_plus_2m=_now_plus_2m)
+            except Exception:
+                pass
         messages = [{"role": "system", "content": prompt}, {"role": "user", "content": text}]
         for attempt in range(2):
             try:
@@ -499,6 +510,14 @@ class BlogWriter(Star):
             title = str(data.get("title") or "").strip()
             if not title:
                 title = (original_text or "").strip()[:20] or "日程"
+            # 清洗标题中的相对时间残留（如 LLM 返回“2分钟后周会”）
+            if title and re.search(r"\d+\s*分钟后|\d+\s*小时后|半小时后|半个小时后", title):
+                title = re.sub(r"\d+\s*分钟后", "", title)
+                title = re.sub(r"\d+\s*小时后", "", title)
+                title = re.sub(r"\d+\s*秒后", "", title)
+                title = title.replace("半小时后", "").replace("半个小时后", "").strip(" ，,。")
+                if not title:
+                    title = "日程"
             date_val = data.get("date")
             now = datetime.now()
             dt = None
@@ -519,7 +538,7 @@ class BlogWriter(Star):
                         from blog_writer_core import _parse_schedule_date as _psd, _parse_schedule_time as _pst  # type: ignore
 
                         base = _psd(original_text or title, now)
-                        dt, has_time = _pst(original_text or title, base)
+                        dt, has_time = _pst(original_text or title, base, now)
                         if all_day is None:
                             all_day = not has_time
                     except Exception:
@@ -530,7 +549,7 @@ class BlogWriter(Star):
                     from blog_writer_core import _parse_schedule_date as _psd, _parse_schedule_time as _pst  # type: ignore
 
                     base = _psd(original_text or title, now)
-                    dt, has_time = _pst(original_text or title, base)
+                    dt, has_time = _pst(original_text or title, base, now)
                     if all_day is None:
                         all_day = not has_time
                 except Exception:
@@ -543,6 +562,19 @@ class BlogWriter(Star):
                     all_day = True
             if all_day is None:
                 all_day = dt.hour == 0 and dt.minute == 0 and dt.second == 0
+            # 相对时间兜底：若原文本含“分钟后”等但 dt 仍为 00:00，说明 LLM 未正确解析，用正则重算
+            if original_text and re.search(r"(\d+\s*(?:分钟|分|小时|时|秒)\s*后|半小时后|半个小时后)", original_text):
+                if dt.hour == 0 and dt.minute == 0 and dt.second == 0:
+                    try:
+                        from blog_writer_core import _parse_schedule_date as _psd2, _parse_schedule_time as _pst2
+
+                        base2 = _psd2(original_text, now)
+                        dt2, has_time2 = _pst2(original_text, base2, now)
+                        if has_time2:
+                            dt = dt2
+                            all_day = False
+                    except Exception:
+                        pass
             priority = str(data.get("priority") or self._cfg("schedule_default_priority", "none")).strip() or "none"
             if priority not in SCHEDULE_PRIORITIES:
                 # 兼容中文
