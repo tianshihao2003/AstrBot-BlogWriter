@@ -291,36 +291,40 @@ class BlogWriter(Star):
     async def _send_remind(self, user_id: str, title: str, origin: str = "") -> None:
         try:
             logger.info("BlogWriter: 到点提醒 user=%s title=%s origin=%s", user_id, title, origin)
-            # 尝试主动推送
             sent = False
-            # 1. 优先用 origin + Plain（最通用）
+            # 1. 优先用 origin 直接发纯文本（最通用，兼容所有版本）
             if origin and hasattr(self.context, "send_message"):
-                try:
-                    from astrbot.core.message.components import Plain as _Plain
-
-                    # 兼容不同 AstrBot 版本的 MessageChain 位置
+                for attempt in [
+                    lambda: self.context.send_message(origin, title),  # type: ignore
+                    lambda: self.context.send_message(origin, Plain(title)),  # type: ignore
+                    lambda: self.context.send_message(origin, [Plain(title)]),  # type: ignore
+                ]:
                     try:
-                        from astrbot.core.message.message import MessageChain as _MC  # type: ignore
-                    except ImportError:
-                        try:
-                            from astrbot.core.message.components import MessageChain as _MC  # type: ignore
-                        except ImportError:
-                            _MC = None  # type: ignore
-                    if _MC is not None:
-                        chain = _MC(chain=[_Plain(title)]) if hasattr(_MC, "chain") else _MC([_Plain(title)])  # type: ignore
-                    else:
-                        chain = [_Plain(title)]  # type: ignore
-                    await self.context.send_message(origin, chain)  # type: ignore
-                    sent = True
-                except Exception as e:
-                    logger.warning("BlogWriter: 主动推送 via origin 失败: %s", e)
+                        await attempt()  # type: ignore
+                        sent = True
+                        logger.info("BlogWriter: 主动推送 via origin 成功 origin=%s", origin)
+                        break
+                    except Exception as e:
+                        logger.debug("BlogWriter: 主动推送尝试失败: %s", e)
+                        continue
+                if not sent:
+                    logger.warning("BlogWriter: 主动推送 via origin 失败: all attempts failed origin=%s", origin)
             # 2. 兜底：尝试 weixin_oc 平台直接发
             if not sent and hasattr(self.context, "get_platform"):
                 try:
                     plat = self.context.get_platform("weixin_oc")
                     if plat and hasattr(plat, "send_message"):
-                        await plat.send_message(Plain(title), user_id)  # type: ignore
-                        sent = True
+                        for attempt in [
+                            lambda: plat.send_message(Plain(title), user_id),  # type: ignore
+                            lambda: plat.send_message(title, user_id),  # type: ignore
+                            lambda: plat.send_message([Plain(title)], user_id),  # type: ignore
+                        ]:
+                            try:
+                                await attempt()  # type: ignore
+                                sent = True
+                                break
+                            except Exception:
+                                continue
                 except Exception as e:
                     logger.warning("BlogWriter: 平台推送失败: %s", e)
             if not sent:
