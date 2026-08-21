@@ -30,6 +30,18 @@ from typing import Dict, List, Optional, Tuple
 
 import httpx
 
+try:
+    from apscheduler.schedulers.background import BackgroundScheduler
+    from apscheduler.triggers.date import DateTrigger
+
+    HAS_APSCHEDULER = True
+except ImportError:
+    BackgroundScheduler = None  # type: ignore
+    DateTrigger = None  # type: ignore
+    HAS_APSCHEDULER = False
+
+REMINDER_FILE = Path(__file__).parent / "data" / "schedules_reminder.json"
+
 from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, MessageEventResult, filter
 from astrbot.api.message_components import Image
@@ -173,6 +185,102 @@ class BlogWriter(Star):
         self._lock = asyncio.Lock()
         self._client = None
         self._reminders: List[Tuple[str, str, datetime]] = []
+        self._reminder_file = Path(__file__).parent / "data" / "schedules_reminder.json"
+        self._scheduler = None
+        if HAS_APSCHEDULER:
+            try:
+                self._scheduler = BackgroundScheduler()
+                self._scheduler.start()
+                self._restore_reminders()
+                logger.info("BlogWriter: APScheduler 提醒调度器已启动")
+            except Exception as e:
+                logger.warning("BlogWriter: APScheduler 启动失败: %s", e)
+                self._scheduler = None
+        else:
+            logger.warning("BlogWriter: 未安装 apscheduler，提醒功能将仅内存生效（重启丢失）")
+
+    def _load_reminders(self) -> List[Dict]:
+        try:
+            # 优先用模块级 REMINDER_FILE（便于测试时 mock），兼容实例级
+            rf = globals().get("REMINDER_FILE", getattr(self, "_reminder_file", REMINDER_FILE))
+            if rf.exists():
+                return json.loads(rf.read_text(encoding="utf-8"))
+        except Exception as e:
+            logger.warning("BlogWriter: 读取提醒文件失败: %s", e)
+        return []
+
+    def _save_reminders(self, data: List[Dict]) -> None:
+        try:
+            rf = globals().get("REMINDER_FILE", getattr(self, "_reminder_file", REMINDER_FILE))
+            rf.parent.mkdir(parents=True, exist_ok=True)
+            rf.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+        except Exception as e:
+            logger.warning("BlogWriter: 保存提醒文件失败: %s", e)
+
+    def _restore_reminders(self) -> None:
+        if not hasattr(self, "_reminders"):
+            self._reminders = []
+        if not HAS_APSCHEDULER or not self._scheduler:
+            # 无调度器时仍恢复到内存列表，供列表展示
+            try:
+                for item in self._load_reminders():
+                    try:
+                        remind_at = datetime.fromisoformat(item["remind_at"])
+                        if remind_at <= datetime.now():
+                            continue
+                        self._reminders.append((item["user_id"], item["title"], remind_at))
+                    except Exception:
+                        continue
+            except Exception as e:
+                logger.warning("BlogWriter: 恢复提醒(内存)异常: %s", e)
+            return
+        try:
+            for item in self._load_reminders():
+                try:
+                    remind_at = datetime.fromisoformat(item["remind_at"])
+                    if remind_at <= datetime.now():
+                        continue
+                    self._reminders.append((item["user_id"], item["title"], remind_at))
+                    self._scheduler.add_job(
+                        self._send_remind_sync,
+                        trigger=DateTrigger(run_date=remind_at),
+                        args=[item["user_id"], item["title"]],
+                        id=item.get("id") or f"{item['user_id']}_{remind_at.isoformat()}",
+                        replace_existing=True,
+                    )
+                except Exception as e:
+                    logger.warning("BlogWriter: 恢复提醒失败: %s %s", item, e)
+        except Exception as e:
+            logger.warning("BlogWriter: 恢复提醒异常: %s", e)
+
+    def _send_remind_sync(self, user_id: str, title: str) -> None:
+        try:
+            asyncio.run_coroutine_threadsafe(self._send_remind(user_id, title), asyncio.get_event_loop())
+        except RuntimeError:
+            # 无运行中的 loop 时创建临时 loop
+            try:
+                asyncio.run(self._send_remind(user_id, title))
+            except Exception as e:
+                logger.warning("BlogWriter: 同步发送提醒失败: %s", e)
+
+    async def _send_remind(self, user_id: str, title: str) -> None:
+        try:
+            # 优先通过 context 主动发消息（weixin_oc 支持）
+            if hasattr(self.context, "send_message"):
+                try:
+                    await self.context.send_message(
+                        await self.context.get_platform("weixin_oc").send_message(
+                            title, user_id
+                        )
+                    )
+                except Exception:
+                    pass
+            # 兜底：尝试直接发（不同 AstrBot 版本 API 差异）
+            logger.info("BlogWriter: 到点提醒 user=%s title=%s", user_id, title)
+            # 也可通过 logger 提示，用户需结合 AstrBot 的消息发送能力
+            # 若平台不支持主动推送，则仅记录日志
+        except Exception as e:
+            logger.warning("BlogWriter: 发送提醒失败: %s", e)
 
     def _get_client(self) -> httpx.AsyncClient:
         if self._client is None:
@@ -470,12 +578,38 @@ class BlogWriter(Star):
             return None
 
     def _schedule_remind(self, user_id: str, title: str, remind_at: datetime) -> None:
-        """占位调度：Task 4 将替换为 APScheduler 持久化。此处仅内存记录 + 日志。"""
+        """持久化调度：写入 json + APScheduler 定时，到点私聊提醒。 past 则不调度。"""
         try:
+            if remind_at <= datetime.now():
+                logger.info("BlogWriter: 提醒时间已过，不调度 user=%s title=%s at=%s", user_id, title, remind_at)
+                return
             logger.info("BlogWriter: 调度提醒 user=%s title=%s at=%s", user_id, title, remind_at)
             if not hasattr(self, "_reminders"):
                 self._reminders = []
             self._reminders.append((user_id, title, remind_at))
+            # 持久化
+            try:
+                data = self._load_reminders()
+                rid = f"{user_id}_{title}_{remind_at.isoformat()}"
+                data.append({"id": rid, "user_id": user_id, "title": title, "remind_at": remind_at.isoformat()})
+                # 只保留未来 100 条
+                data = [d for d in data if datetime.fromisoformat(d["remind_at"]) > datetime.now() - timedelta(days=1)][-100:]
+                self._save_reminders(data)
+            except Exception as e:
+                logger.warning("BlogWriter: 保存提醒持久化失败: %s", e)
+            # 调度
+            if HAS_APSCHEDULER and self._scheduler:
+                try:
+                    rid = f"{user_id}_{title}_{remind_at.isoformat()}"
+                    self._scheduler.add_job(
+                        self._send_remind_sync,
+                        trigger=DateTrigger(run_date=remind_at),
+                        args=[user_id, f"🔔 日程提醒：{title} 时间到了"],
+                        id=rid,
+                        replace_existing=True,
+                    )
+                except Exception as e:
+                    logger.warning("BlogWriter: APScheduler 添加任务失败: %s", e)
         except Exception as e:
             logger.warning("BlogWriter: 调度提醒失败: %s", e)
 
@@ -554,15 +688,57 @@ class BlogWriter(Star):
         )
 
     def _handle_remind(self, event: AstrMessageEvent, user_id: str, args: List[str]):
-        # 简单实现：列出内存中的待提醒或提示
-        if hasattr(self, "_reminders") and self._reminders:
+        text = " ".join(args).strip().lower()
+        # 取消
+        if text.startswith("取消") or text.startswith("cancel"):
+            target = text.replace("取消", "").replace("cancel", "").strip()
+            if not target:
+                return event.plain_result("用法：/提醒 取消 <标题关键词> 或 /提醒 取消 全部")
+            try:
+                data = self._load_reminders()
+                before = len(data)
+                if target in ("全部", "all", "所有"):
+                    data = [d for d in data if d["user_id"] != user_id]
+                    if HAS_APSCHEDULER and self._scheduler:
+                        for job in list(self._scheduler.get_jobs()):
+                            if job.id.startswith(user_id):
+                                self._scheduler.remove_job(job.id)
+                else:
+                    new_data = []
+                    for d in data:
+                        if d["user_id"] == user_id and target in d["title"]:
+                            if HAS_APSCHEDULER and self._scheduler:
+                                try:
+                                    self._scheduler.remove_job(d["id"])
+                                except Exception:
+                                    pass
+                            continue
+                        new_data.append(d)
+                    data = new_data
+                self._save_reminders(data)
+                return event.plain_result(f"已取消 {before - len(data)} 条提醒。")
+            except Exception as e:
+                return event.plain_result(f"取消失败：{e}")
+        # 列表
+        try:
+            data = self._load_reminders()
+            mine = [d for d in data if d["user_id"] == user_id and datetime.fromisoformat(d["remind_at"]) > datetime.now()]
+            if not mine:
+                # 兼容旧内存
+                if hasattr(self, "_reminders") and self._reminders:
+                    lines = ["提醒列表（内存）："]
+                    for uid, title, at in self._reminders[-10:]:
+                        if uid == user_id:
+                            lines.append(f"- {title} 于 {at.strftime('%Y-%m-%d %H:%M:%S') if isinstance(at, datetime) else at}")
+                    if len(lines) > 1:
+                        return event.plain_result("\n".join(lines))
+                return event.plain_result("当前无待提醒日程（可通过 /日程 创建带时间的提醒，系统将提前通知。可用 /提醒 取消 标题关键词 取消）")
             lines = ["提醒列表："]
-            for uid, title, at in self._reminders[-10:]:
-                if uid == user_id or uid == str(user_id):
-                    lines.append("- {} 于 {}".format(title, at.strftime("%Y-%m-%d %H:%M:%S") if isinstance(at, datetime) else at))
-            if len(lines) > 1:
-                return event.plain_result("\n".join(lines))
-        return event.plain_result("提醒：当前无待提醒日程（可通过 /日程 创建带时间的提醒，系统将提前通知）。")
+            for d in mine[-10:]:
+                lines.append(f"- {d['title']} 于 {d['remind_at'].replace('T',' ')} (提前{self._cfg('schedule_remind_before',10)}分)")
+            return event.plain_result("\n".join(lines))
+        except Exception as e:
+            return event.plain_result(f"读取提醒失败：{e}")
 
     # ---------- 消息入口 ----------
 
