@@ -201,10 +201,22 @@ class BlogWriter(Star):
         self._client = None
         self._reminders: List[Tuple[str, str, datetime]] = []
         self._reminder_file = Path(__file__).parent / "data" / "schedules_reminder.json"
+        self._loop = None
+        try:
+            self._loop = asyncio.get_running_loop()
+        except RuntimeError:
+            try:
+                self._loop = asyncio.get_event_loop()
+            except Exception:
+                self._loop = None
         self._scheduler = None
         if HAS_APSCHEDULER:
             try:
-                self._scheduler = BackgroundScheduler()
+                # 显式指定上海时区，避免 UTC 偏差
+                try:
+                    self._scheduler = BackgroundScheduler(timezone=SHANGHAI_TZ)
+                except Exception:
+                    self._scheduler = BackgroundScheduler()
                 self._scheduler.start()
                 self._restore_reminders()
                 logger.info("BlogWriter: APScheduler 提醒调度器已启动")
@@ -261,7 +273,7 @@ class BlogWriter(Star):
                         continue
                     self._reminders.append((item["user_id"], item["title"], remind_at))
                     origin = item.get("origin") or ""
-                    # 调度时用上海时区
+                    # 调度时用上海时区，存的是 naive，按上海解释
                     try:
                         remind_at_tz = remind_at.replace(tzinfo=SHANGHAI_TZ)
                     except Exception:
@@ -279,8 +291,23 @@ class BlogWriter(Star):
             logger.warning("BlogWriter: 恢复提醒异常: %s", e)
 
     def _send_remind_sync(self, user_id: str, title: str, origin: str = "") -> None:
+        # 使用初始化时保存的 loop，避免取到错误 loop 导致 Timeout context manager 异常
+        loop = getattr(self, "_loop", None)
+        if loop is None:
+            try:
+                loop = asyncio.get_running_loop()
+                self._loop = loop
+            except RuntimeError:
+                try:
+                    loop = asyncio.get_event_loop()
+                    self._loop = loop
+                except Exception:
+                    loop = None
         try:
-            asyncio.run_coroutine_threadsafe(self._send_remind(user_id, title, origin), asyncio.get_event_loop())
+            if loop and loop.is_running():
+                asyncio.run_coroutine_threadsafe(self._send_remind(user_id, title, origin), loop)
+            else:
+                asyncio.run(self._send_remind(user_id, title, origin))
         except RuntimeError:
             # 无运行中的 loop 时创建临时 loop
             try:
@@ -295,40 +322,39 @@ class BlogWriter(Star):
             # 1. 优先用 origin + MessageChain（按 AstrBot 官方文档：MessageChain().message() + send_message(origin, chain)）
             if origin and hasattr(self.context, "send_message"):
                 def _make_chain(text: str):
-                    # 标准构造：from astrbot.core.message.message_event_result import MessageChain
+                    # 标准构造：优先尝试最简的 List[Plain]，再尝试 MessageChain
+                    # 先试最简，避免 MessageChain().message() 内部的 timeout 陷阱
                     try:
                         from astrbot.core.message.message_event_result import MessageChain as _MC  # type: ignore
 
+                        # 直接构造，避免调用 .message()（其内部可能用 asyncio.timeout）
                         try:
-                            return _MC().message(text)  # type: ignore
+                            return _MC(chain=[Plain(text)])  # type: ignore
                         except Exception:
                             try:
-                                return _MC(chain=[Plain(text)])  # type: ignore
-                            except Exception:
                                 return _MC([Plain(text)])  # type: ignore
+                            except Exception:
+                                pass
                     except ImportError:
+                        pass
+                    except Exception:
                         pass
                     try:
                         from astrbot.core.message.message import MessageChain as _MC1  # type: ignore
 
                         try:
-                            return _MC1(chain=[Plain(text)])  # type: ignore
+                            return _MC1([Plain(text)])  # type: ignore
                         except Exception:
                             try:
-                                mc = _MC1()  # type: ignore
-                                mc.chain = [Plain(text)]  # type: ignore
-                                return mc
+                                return _MC1(chain=[Plain(text)])  # type: ignore
                             except Exception:
-                                return _MC1([Plain(text)])  # type: ignore
+                                pass
                     except ImportError:
-                        try:
-                            from astrbot.core.message.components import MessageChain as _MC2  # type: ignore
-
-                            return _MC2([Plain(text)])  # type: ignore
-                        except ImportError:
-                            return [Plain(text)]  # type: ignore
+                        pass
                     except Exception:
-                        return [Plain(text)]  # type: ignore
+                        pass
+                    # 兜底：直接 Plain 列表，很多版本 send_message 也接受
+                    return [Plain(text)]  # type: ignore
 
                 for idx, maker in enumerate(
                     [
