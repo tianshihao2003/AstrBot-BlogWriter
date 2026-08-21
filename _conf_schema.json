@@ -73,5 +73,30 @@
     "description": "允许使用的用户 ID 列表（个人微信为 wxid）；空列表 = 全部拒绝",
     "type": "list",
     "default": []
+  },
+  "bill_default_account": {
+    "description": "账单默认账户",
+    "type": "string",
+    "default": "微信"
+  },
+  "bill_default_category": {
+    "description": "账单默认分类",
+    "type": "string",
+    "default": "其他"
+  },
+  "schedule_default_priority": {
+    "description": "日程默认优先级",
+    "type": "string",
+    "default": "none"
+  },
+  "schedule_remind_before": {
+    "description": "日程默认提前提醒分钟（0=准点）",
+    "type": "int",
+    "default": 10
+  },
+  "enable_ai_bill_schedule": {
+    "description": "启用 AI 自然语言记账/日程（关闭则仅正则）",
+    "type": "bool",
+    "default": true
   }
 }
