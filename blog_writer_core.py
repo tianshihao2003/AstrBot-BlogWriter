@@ -972,6 +972,8 @@ def parse_schedule(text: str, now=None) -> Tuple[Optional[Dict], str]:
     raw = (text or "").strip()
     if not raw:
         return None, "内容为空"
+    # 兼容常见错别字
+    raw = raw.replace("生气", "生日").replace("生如", "生日")
 
     base_date = _parse_schedule_date(raw, now)
     dt, has_time = _parse_schedule_time(raw, base_date, now)
@@ -1031,6 +1033,81 @@ def parse_schedule(text: str, now=None) -> Tuple[Optional[Dict], str]:
         "allDay": all_day,
     }
     return data, ""
+
+
+def parse_schedules_batch(text: str, now=None) -> Tuple[List[Dict], str]:
+    """批量解析多条生日/日程（用于一句含多个“生日是农历X月X日”的情况）。直接扫描全文所有日期。"""
+    now = now or now_shanghai()
+    raw = (text or "").strip().replace("生气", "生日").replace("生如", "生日")
+    if not raw:
+        return [], "内容为空"
+    # 关键词到 person 的映射
+    person_map = {
+        "我": "我",
+        "我的": "我",
+        "对象": "对象",
+        "我对象": "对象",
+        "对象是": "对象",
+        "妈": "我妈",
+        "妈妈": "我妈",
+        "我妈": "我妈",
+        "爸": "我爸",
+        "爸爸": "我爸",
+        "我爸": "我爸",
+        "大姐": "大姐",
+        "二姐": "二姐",
+        "姐": "大姐",
+    }
+    is_lunar_all = "都是农历" in raw or "均为农历" in raw
+    results: List[Dict] = []
+    # 直接扫描全文所有日期，避免按逗号切分丢失“对象的是12.22”这类无“生日”关键词的条目
+    for m_date in re.finditer(r"(\d{1,2})[.\-月](\d{1,2})日?", raw):
+        date_start = m_date.start()
+        # 向前取30字符找人物
+        context = raw[max(0, date_start - 20) : date_start]
+        person = ""
+        for key in sorted(person_map.keys(), key=len, reverse=True):
+            if key in context:
+                person = person_map[key]
+                break
+        if not person:
+            m_p = re.search(r"(\S{1,6})的是", context)
+            if m_p:
+                person = m_p.group(1).strip()
+        try:
+            month = int(m_date.group(1))
+            day = int(m_date.group(2))
+        except ValueError:
+            continue
+        is_lunar = is_lunar_all or "农历" in raw[max(0, date_start - 10) : m_date.end() + 10] or "农历" in context
+        # 农历转公历：用当前年份的农历对应公历（简化：直接存公历的8.24，若 is_lunar 则备注）
+        # 真正转换需 lunar 库，此处先存公历的月日，标题注明农历
+        try:
+            # 若是农历，尝试用 lunar_python 转换，否则直接用公历
+            dt = datetime(now.year, month, day)
+            # 若已过今年，则用明年（生日按来年算）
+            if dt < now.replace(hour=0, minute=0, second=0, microsecond=0):
+                dt = datetime(now.year + 1, month, day)
+        except ValueError:
+            continue
+        title = f"{person}生日" if person else "生日"
+        if is_lunar:
+            title += "（农历）"
+        results.append({
+            "title": title,
+            "date": dt,
+            "priority": "none",
+            "location": "",
+            "repeat": "每年",
+            "remind_before": 10,
+            "allDay": True,
+            "category": "birthday",
+            "person": person,
+            "is_lunar": is_lunar,
+        })
+    if not results:
+        return [], "未识别到生日信息"
+    return results, ""
 
 
 def build_bill_md(data: Dict, now=None) -> str:

@@ -176,18 +176,19 @@ BILL_PROMPT = (
 )
 SCHEDULE_PROMPT = (
     "你是日程信息抽取助手，只输出 JSON，不要解释。时区为 Asia/Shanghai。\n"
-    "字段：title(标题), date(YYYY-MM-DD HH:MM:SS 或 YYYY-MM-DD), allDay(bool), priority(none/low/medium/high), location(地点), repeat(每天/每周/每月/每年或空), remind_before(整数分钟)\n"
+    "字段：title(标题), date(YYYY-MM-DD HH:MM:SS 或 YYYY-MM-DD), allDay(bool), priority(none/low/medium/high), location(地点), repeat(每天/每周/每月/每年或空), remind_before(整数分钟), category(schedule/birthday/anniversary/holiday), person(人物)\n"
     "优先级白名单: none、low、medium、high（高优=high，中优=medium，低优=low）\n"
     "时间基准：{now}（当前时间，请以此为基准精确计算相对时间，不要加减12小时）\n"
     "相对时间规则：'X分钟后' = 基准+ X分钟，'半小时后'=基准+30分钟，'X小时后'=基准+X小时，保持日期与基准同一天除非跨天\n"
+    "批量生日：若输入含多个生日如“我的农历8月24对象12.22妈8.7…都是农历”，请返回 JSON 数组，每个元素为一个生日对象，category=birthday，repeat=每年，allDay=true\n"
     "示例输入：明天下午3点高优在会议室A开周会 每周重复 提前15分钟\n"
-    '示例输出：{"title":"周会","date":"2026-08-22 15:00:00","allDay":false,"priority":"high","location":"会议室A","repeat":"每周","remind_before":15}\n'
+    '示例输出：{"title":"周会","date":"2026-08-22 15:00:00","allDay":false,"priority":"high","location":"会议室A","repeat":"每周","remind_before":15, "category":"schedule", "person":""}\n'
     "示例输入：2分钟后在会议室A开周会 高优 提前1分钟（若基准是 {now}，2分钟后就是 {now_plus_2m}）\n"
-    '示例输出：{"title":"周会","date":"{now_plus_2m}","allDay":false,"priority":"high","location":"会议室A","repeat":"","remind_before":1}\n'
-    "示例输入：明天上午9点开会\n"
-    '示例输出：{"title":"开会","date":"2026-08-22 09:00:00","allDay":false,"priority":"none","location":"","repeat":"","remind_before":10}\n'
+    '示例输出：{"title":"周会","date":"{now_plus_2m}","allDay":false,"priority":"high","location":"会议室A","repeat":"","remind_before":1, "category":"schedule", "person":""}\n'
+    "示例输入：我的生日农历8月24对象12.22妈8.7大姐11.22爸12.14二姐4.4都是农历\n"
+    '示例输出：[{"title":"我生日","date":"2026-08-24","allDay":true,"priority":"none","location":"","repeat":"每年","remind_before":10, "category":"birthday", "person":"我"}, {"title":"对象生日","date":"2026-12-22","allDay":true,"priority":"none","location":"","repeat":"每年","remind_before":10, "category":"birthday", "person":"对象"}]\n'
     "未提及时间则 allDay=true，priority 默认 none，remind_before 默认 10。\n"
-    "只输出 JSON 对象。"
+    "单条返回 JSON 对象，多条返回 JSON 数组，只输出 JSON。"
 )
 
 
@@ -548,14 +549,16 @@ class BlogWriter(Star):
                     raw = re.sub(r"^```(?:json)?\s*", "", raw)
                     raw = re.sub(r"\s*```$", "", raw)
                     raw = raw.strip()
-                # 若含多余文字，提取 JSON 对象
-                if not raw.startswith("{"):
-                    m = re.search(r"\{.*\}", raw, re.DOTALL)
+                # 若含多余文字，提取 JSON 对象或数组
+                if not raw.startswith(("{", "[")):
+                    m = re.search(r"(\{.*\}|\[.*\])", raw, re.DOTALL)
                     if m:
-                        raw = m.group(0)
+                        raw = m.group(1)
                 data = json.loads(raw)
                 if isinstance(data, dict):
                     return data
+                if isinstance(data, list) and data and all(isinstance(x, dict) for x in data):
+                    return data  # type: ignore
                 return None
             except asyncio.TimeoutError:
                 logger.warning("BlogWriter: LLM 抽取超时(第%s次) kind=%s", attempt + 1, kind)
@@ -866,16 +869,60 @@ class BlogWriter(Star):
             return event.plain_result("日程会话已创建，请发送日程内容（如：明天下午3点在会议室A开周会），发 /发布 提交，发 /取消 放弃。")
         data = await self._try_ai_extract(text, "schedule")
         if data:
-            normalized = self._normalize_schedule_data(data, text)
-            if normalized:
-                self._sessions[user_id] = Session("schedule", normalized)
-                return event.plain_result(
-                    "已识别日程：{} 时间{} 优先级{}。发 /发布 提交，发 /取消 放弃。".format(
-                        normalized.get("title"),
-                        normalized.get("date").strftime("%Y-%m-%d %H:%M:%S") if isinstance(normalized.get("date"), datetime) else normalized.get("date"),
-                        normalized.get("priority"),
+            # 兼容批量（AI 返回数组）
+            if isinstance(data, list):
+                normalized_list = []
+                for item in data:
+                    norm = self._normalize_schedule_data(item, text)
+                    if norm:
+                        # 补默认
+                        if norm.get("priority") == "none":
+                            default_p = self._cfg("schedule_default_priority", "none")
+                            if default_p in SCHEDULE_PRIORITIES:
+                                norm["priority"] = default_p
+                        if norm.get("remind_before") is None:
+                            norm["remind_before"] = self._cfg("schedule_remind_before", 10)
+                        normalized_list.append(norm)
+                if normalized_list:
+                    self._sessions[user_id] = Session("schedule_batch", {"items": normalized_list})
+                    titles = "、".join(x["title"] for x in normalized_list[:5])
+                    more = f"等{len(normalized_list)}条" if len(normalized_list) > 5 else ""
+                    return event.plain_result(f"已识别 {len(normalized_list)} 条：{titles}{more}，发 /发布 批量提交，发 /取消 放弃。")
+            else:
+                normalized = self._normalize_schedule_data(data, text)
+                if normalized:
+                    if normalized.get("priority") == "none":
+                        default_p = self._cfg("schedule_default_priority", "none")
+                        if default_p in SCHEDULE_PRIORITIES:
+                            normalized["priority"] = default_p
+                    if normalized.get("remind_before") is None:
+                        normalized["remind_before"] = self._cfg("schedule_remind_before", 10)
+                    self._sessions[user_id] = Session("schedule", normalized)
+                    return event.plain_result(
+                        "已识别日程：{} 时间{} 优先级{}。发 /发布 提交，发 /取消 放弃。".format(
+                            normalized.get("title"),
+                            normalized.get("date").strftime("%Y-%m-%d %H:%M:%S") if isinstance(normalized.get("date"), datetime) else normalized.get("date"),
+                            normalized.get("priority"),
+                        )
                     )
-                )
+        # 批量正则兜底
+        try:
+            from blog_writer_core import parse_schedules_batch  # type: ignore
+
+            batch, _ = parse_schedules_batch(text)
+            if batch and len(batch) > 1:
+                for item in batch:
+                    if item.get("priority") == "none":
+                        default_p = self._cfg("schedule_default_priority", "none")
+                        if default_p in SCHEDULE_PRIORITIES:
+                            item["priority"] = default_p
+                    if item.get("remind_before") is None:
+                        item["remind_before"] = self._cfg("schedule_remind_before", 10)
+                self._sessions[user_id] = Session("schedule_batch", {"items": batch})
+                titles = "、".join(x["title"] for x in batch[:5])
+                return event.plain_result(f"已识别 {len(batch)} 条生日：{titles}，发 /发布 批量提交。")
+        except Exception:
+            pass
         parsed, err = parse_schedule(text)
         if parsed is None:
             return event.plain_result("日程解析失败：{}，请重发或发 /取消。".format(err))
@@ -1383,6 +1430,56 @@ class BlogWriter(Star):
                 slug = clean_filename_part(title)
                 path = "src/content/schedules/{}-{}.md".format(now.strftime("%Y-%m-%d"), slug)
                 link = "/schedules/{}".format(slug)
+            elif session.kind == "schedule_batch":
+                items = session.meta.get("items") or []
+                if not items:
+                    return event.plain_result("批量日程为空，无法发布。")
+                # 批量创建：逐个生成并提交
+                success = 0
+                fails = []
+                for item in items:
+                    try:
+                        md_item = build_schedule_md(item, now)
+                        title_item = str(item.get("title") or "日程").strip() or "日程"
+                        slug_item = clean_filename_part(title_item)
+                        path_item = "src/content/schedules/{}-{}.md".format(now.strftime("%Y-%m-%d"), slug_item)
+                        ok_item, final_item, err_item = await self._commit_md(path_item, md_item, now)
+                        if ok_item:
+                            success += 1
+                            # 若为生日则无需提醒；若含时间则调度
+                            try:
+                                date_val = item.get("date")
+                                dt = date_val if isinstance(date_val, datetime) else None
+                                if isinstance(date_val, str):
+                                    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d"):
+                                        try:
+                                            dt = datetime.strptime(date_val.strip(), fmt)
+                                            break
+                                        except ValueError:
+                                            continue
+                                if dt and not item.get("allDay", True):
+                                    all_day = item.get("allDay")
+                                    if all_day is None:
+                                        all_day = dt.hour == 0 and dt.minute == 0
+                                    if not all_day:
+                                        remind_before = item.get("remind_before", self._cfg("schedule_remind_before", 10))
+                                        try:
+                                            remind_before = int(remind_before)
+                                        except Exception:
+                                            remind_before = 10
+                                        remind_at = dt - timedelta(minutes=remind_before) if remind_before > 0 else dt
+                                        origin = getattr(event, "unified_msg_origin", "") or getattr(event, "session_id", "") or user_id
+                                        self._schedule_remind(user_id, title_item, remind_at, origin, remind_before)
+                            except Exception:
+                                pass
+                        else:
+                            fails.append(f"{title_item}:{err_item}")
+                    except Exception as e:
+                        fails.append(f"{item.get('title','?')}:{e}")
+                self._sessions.pop(user_id, None)
+                if fails:
+                    return event.plain_result(f"批量发布完成：成功{success}条，失败{len(fails)}条：{'; '.join(fails[:3])}")
+                return event.plain_result(f"批量发布成功 ✅ 共{success}条，已写入 schedules。")
             else:
                 lat, lng = await self._geocode(
                     session.meta.get("province", "") + session.meta.get("city", "")
