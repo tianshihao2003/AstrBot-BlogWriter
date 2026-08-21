@@ -92,6 +92,7 @@ try:
         parse_album,
         parse_album_frontmatter,
         parse_bill,
+        parse_bills_batch,
         parse_dynamic,
         parse_friend_text,
         parse_github_put_response,
@@ -100,6 +101,7 @@ try:
         parse_note,
         parse_place,
         parse_schedule,
+        parse_schedules_batch,
         place_filename,
         upload_base_host,
         upload_url_with_return_format,
@@ -136,6 +138,7 @@ except ImportError:  # 兼容非包形式加载
         parse_album,
         parse_album_frontmatter,
         parse_bill,
+        parse_bills_batch,
         parse_dynamic,
         parse_friend_text,
         parse_github_put_response,
@@ -144,6 +147,7 @@ except ImportError:  # 兼容非包形式加载
         parse_note,
         parse_place,
         parse_schedule,
+        parse_schedules_batch,
         place_filename,
         upload_base_host,
         upload_url_with_return_format,
@@ -163,16 +167,19 @@ RETRY_DELAYS = (1.0, 3.0)
 BILL_CATEGORIES_STR = "、".join(BILL_CATEGORIES) if "BILL_CATEGORIES" in globals() else "餐饮、交通、住房、工资、居家生活、交流通讯、食品酒水、职业收入、人情收礼、其他"
 BILL_ACCOUNTS_STR = "、".join(BILL_ACCOUNTS) if "BILL_ACCOUNTS" in globals() else "微信、支付宝、银行卡、现金、其他"
 BILL_PROMPT = (
-    "你是账单信息抽取助手，只输出 JSON，不要解释。\n"
+    "你是账单信息抽取助手，只输出 JSON，不要解释。时区为 Asia/Shanghai。\n"
     "字段：title(标题/简短描述), amount(数字,支出为负收入为正), type(expense/income), category(白名单分类), account(白名单账户), date(YYYY-MM-DD), description(描述)\n"
     "分类白名单: " + BILL_CATEGORIES_STR + "\n"
     "账户白名单: " + BILL_ACCOUNTS_STR + "\n"
+    "多笔账单：若输入含多笔如“午餐30晚餐45打车12”或“发工资12000奖金5000”，请返回 JSON 数组，每个元素为一笔账单对象\n"
     "示例输入：今天午餐微信花了32\n"
     '示例输出：{"title":"午餐","amount":-32,"type":"expense","category":"餐饮","account":"微信","date":"2026-08-21","description":"午餐"}\n'
     "示例输入：发工资12000 银行卡\n"
     '示例输出：{"title":"工资","amount":12000,"type":"income","category":"工资","account":"银行卡","date":"2026-08-21","description":"工资"}\n'
+    "示例输入：午餐30晚餐45打车12\n"
+    '示例输出：[{"title":"午餐","amount":-30,"type":"expense","category":"餐饮","account":"微信","date":"2026-08-22","description":"午餐"}, {"title":"晚餐","amount":-45,"type":"expense","category":"餐饮","account":"微信","date":"2026-08-22","description":"晚餐"}, {"title":"打车","amount":-12,"type":"expense","category":"交通","account":"微信","date":"2026-08-22","description":"打车"}]\n'
     "未提及的字段用默认值：category=其他, account=微信, date=当天\n"
-    "只输出 JSON 对象。"
+    "单笔返回 JSON 对象，多笔返回 JSON 数组，只输出 JSON。"
 )
 SCHEDULE_PROMPT = (
     "你是日程信息抽取助手，只输出 JSON，不要解释。时区为 Asia/Shanghai。\n"
@@ -487,16 +494,111 @@ class BlogWriter(Star):
 
     # ---------- LLM 抽取（Task 3） ----------
 
+    async def _call_dedicated_ai(self, prompt: str, text: str) -> Optional[str]:
+        """若配置了 ai_api_key/base_url/model，则直接调 OpenAI 兼容接口"""
+        api_key = (self._cfg("ai_api_key") or "").strip()
+        base_url = (self._cfg("ai_base_url") or "").strip().rstrip("/")
+        model = (self._cfg("ai_model") or "").strip()
+        if not api_key or not base_url or not model:
+            return None
+        url = f"{base_url}/chat/completions"
+        headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
+        body = {
+            "model": model,
+            "messages": [{"role": "system", "content": prompt}, {"role": "user", "content": text}],
+            "temperature": 0.2,
+        }
+        try:
+            resp = await self._get_client().post(url, json=body, headers=headers)
+            if resp.status_code >= 400:
+                logger.warning("BlogWriter: 专用 AI 返回 HTTP %s: %s", resp.status_code, resp.text[:200])
+                return None
+            data = resp.json()
+            # OpenAI 格式：choices[0].message.content
+            if isinstance(data, dict) and "choices" in data:
+                choice = data["choices"][0] if data["choices"] else {}
+                msg = choice.get("message", {}) if isinstance(choice, dict) else {}
+                content = msg.get("content") if isinstance(msg, dict) else ""
+                if content:
+                    return str(content)
+            # 兼容直接返回 content
+            if isinstance(data, dict) and "content" in data:
+                return str(data["content"])
+            return None
+        except Exception as e:
+            logger.warning("BlogWriter: 专用 AI 调用失败: %s", e)
+            return None
+
+    async def _handle_models(self, event: AstrMessageEvent) -> MessageEventResult:
+        """处理 /模型列表：拉取专用 AI 的可用模型"""
+        api_key = (self._cfg("ai_api_key") or "").strip()
+        base_url = (self._cfg("ai_base_url") or "").strip().rstrip("/")
+        if not api_key or not base_url:
+            return event.plain_result("请先在插件配置里填 ai_api_key 与 ai_base_url（如 https://api.opencodego.com/v1），再发 /模型列表")
+        url = f"{base_url}/models"
+        headers = {"Authorization": f"Bearer {api_key}"}
+        try:
+            resp = await self._get_client().get(url, headers=headers)
+            if resp.status_code >= 400:
+                return event.plain_result(f"获取模型失败 HTTP {resp.status_code}: {resp.text[:200]}")
+            data = resp.json()
+            models = []
+            if isinstance(data, dict) and "data" in data:
+                for m in data["data"]:
+                    if isinstance(m, dict) and "id" in m:
+                        models.append(str(m["id"]))
+            elif isinstance(data, list):
+                models = [str(x.get("id") or x) for x in data if isinstance(x, dict) or isinstance(x, str)]
+            if not models:
+                return event.plain_result(f"未获取到模型，原始返回：{str(data)[:500]}")
+            # 只展示前 20 个，避免刷屏
+            show = models[:20]
+            more = f" 等共{len(models)}个" if len(models) > 20 else ""
+            return event.plain_result("可用模型：\n" + "\n".join(f"- {m}" for m in show) + more + "\n\n在插件配置的 ai_model 填入要用的模型ID即可生效。")
+        except Exception as e:
+            return event.plain_result(f"获取模型异常：{e}")
+
     async def _try_ai_extract(self, text: str, kind: str) -> Optional[Dict]:
         """LLM 抽取账单/日程，失败返回 None。
 
         - 若 enable_ai_bill_schedule 关闭则直接 None
-        - 通过 hasattr 探测 context.get_using_llm（兼容 get_llm 等）
+        - 优先尝试专用 AI（ai_api_key/base_url/model），失败再回退全局 context.get_using_llm
         - 发 System Prompt（BILL_PROMPT/SCHEDULE_PROMPT 含白名单+示例）+ user_text
         - 解析 JSON，超时 8s 重试1次，失败返回 None
         """
         if not self._cfg("enable_ai_bill_schedule", True):
             return None
+        prompt = BILL_PROMPT if kind == "bill" else SCHEDULE_PROMPT
+        # 动态填充时间基准，避免 LLM 看到字面量 {now}
+        if kind == "schedule":
+            try:
+                _now = now_shanghai()
+                _now_plus_2m = (_now + timedelta(minutes=2)).strftime("%Y-%m-%d %H:%M:%S")
+                prompt = prompt.format(now=_now.strftime("%Y-%m-%d %H:%M:%S"), now_plus_2m=_now_plus_2m)
+            except Exception:
+                pass
+        # 1. 优先专用 AI（opencodego 等）
+        dedicated_raw = await self._call_dedicated_ai(prompt, text)
+        if dedicated_raw:
+            try:
+                raw = dedicated_raw.strip()
+                if raw.startswith("```"):
+                    raw = re.sub(r"^```(?:json)?\s*", "", raw)
+                    raw = re.sub(r"\s*```$", "", raw)
+                    raw = raw.strip()
+                if not raw.startswith(("{", "[")):
+                    m = re.search(r"(\{.*\}|\[.*\])", raw, re.DOTALL)
+                    if m:
+                        raw = m.group(1)
+                data = json.loads(raw)
+                if isinstance(data, dict):
+                    return data
+                if isinstance(data, list) and data and all(isinstance(x, dict) for x in data):
+                    return data  # type: ignore
+            except Exception as e:
+                logger.warning("BlogWriter: 专用 AI 解析失败: %s raw=%r", e, dedicated_raw[:200])
+                # 回退到全局
+                pass
         llm = None
         try:
             if hasattr(self.context, "get_using_llm"):
@@ -834,14 +936,60 @@ class BlogWriter(Star):
         # 先尝试 AI 抽取
         data = await self._try_ai_extract(text, "bill")
         if data:
-            normalized = self._normalize_bill_data(data, text)
-            if normalized:
-                self._sessions[user_id] = Session("bill", normalized)
-                return event.plain_result(
-                    "已识别账单：{} 金额{}，分类{}，账户{}。发 /发布 提交，发 /取消 放弃。".format(
-                        normalized.get("title"), normalized.get("amount"), normalized.get("category"), normalized.get("account")
+            if isinstance(data, list):
+                normalized_list = []
+                for item in data:
+                    norm = self._normalize_bill_data(item, text)
+                    if norm:
+                        if norm.get("account") == "其他":
+                            default_acc = self._cfg("bill_default_account", "其他")
+                            if default_acc in BILL_ACCOUNTS:
+                                norm["account"] = default_acc
+                        if norm.get("category") == "其他":
+                            default_cat = self._cfg("bill_default_category", "其他")
+                            if default_cat in BILL_CATEGORIES:
+                                norm["category"] = default_cat
+                        normalized_list.append(norm)
+                if normalized_list:
+                    self._sessions[user_id] = Session("bill_batch", {"items": normalized_list})
+                    titles = "、".join(f"{x['title']}{x['amount']}" for x in normalized_list[:5])
+                    more = f"等{len(normalized_list)}笔" if len(normalized_list) > 5 else ""
+                    return event.plain_result(f"已识别 {len(normalized_list)} 笔账单：{titles}{more}，发 /发布 批量提交，发 /取消 放弃。")
+            else:
+                normalized = self._normalize_bill_data(data, text)
+                if normalized:
+                    if normalized.get("account") == "其他":
+                        default_acc = self._cfg("bill_default_account", "其他")
+                        if default_acc in BILL_ACCOUNTS:
+                            normalized["account"] = default_acc
+                    if normalized.get("category") == "其他":
+                        default_cat = self._cfg("bill_default_category", "其他")
+                        if default_cat in BILL_CATEGORIES:
+                            normalized["category"] = default_cat
+                    self._sessions[user_id] = Session("bill", normalized)
+                    return event.plain_result(
+                        "已识别账单：{} 金额{}，分类{}，账户{}。发 /发布 提交，发 /取消 放弃。".format(
+                            normalized.get("title"), normalized.get("amount"), normalized.get("category"), normalized.get("account")
+                        )
                     )
-                )
+        # 批量正则兜底
+        try:
+            batch, _ = parse_bills_batch(text)
+            if batch and len(batch) > 1:
+                for item in batch:
+                    if item.get("account") == "其他":
+                        default_acc = self._cfg("bill_default_account", "其他")
+                        if default_acc in BILL_ACCOUNTS:
+                            item["account"] = default_acc
+                    if item.get("category") == "其他":
+                        default_cat = self._cfg("bill_default_category", "其他")
+                        if default_cat in BILL_CATEGORIES:
+                            item["category"] = default_cat
+                self._sessions[user_id] = Session("bill_batch", {"items": batch})
+                titles = "、".join(f"{x['title']}{x['amount']}" for x in batch[:5])
+                return event.plain_result(f"已识别 {len(batch)} 笔账单：{titles}，发 /发布 批量提交。")
+        except Exception:
+            pass
         # 正则兜底
         parsed, err = parse_bill(text)
         if parsed is None:
@@ -1027,6 +1175,72 @@ class BlogWriter(Star):
                     yield event.plain_result(
                         "当前没有进行中的会话，图片/视频未接收。请先发 /动态、/笔记 或 /足迹。"
                     )
+                    return
+                # 自然语言无指令兜底：尝试 AI 识别为账单/日程（需开启 enable_ai_bill_schedule）
+                # 为避免抢占正常闲聊，仅当文本长度适中且含明确账单/日程特征时才接管
+                if self._cfg("enable_ai_bill_schedule", True):
+                    text_nl = (event.message_str or "").strip()
+                    if text_nl and 4 <= len(text_nl) <= 80:
+                        # 账单：含金额 + 账单强关键词（花了/收入/工资/餐饮等），避免纯数字误判
+                        is_bill_like = bool(re.search(r"-?\d+(?:\.\d+)?\s*(?:块|元|￥)", text_nl)) and any(
+                            kw in text_nl for kw in ["花了", "支出", "收入", "工资", "餐饮", "账单", "记账", "花", "买", "消费", "支付", "微信", "支付宝", "银行卡"]
+                        )
+                        # 兼容无单位纯数字但有账户/分类的口语（如“午餐30”）
+                        if not is_bill_like and re.search(r"-?\d+(?:\.\d+)?", text_nl):
+                            is_bill_like = any(kw in text_nl for kw in ["花了", "支出", "工资", "收入", "餐饮", "账单", "记账", "微信", "支付宝"])
+                        if is_bill_like:
+                            # 先试 AI
+                            try:
+                                data_nl = await self._try_ai_extract(text_nl, "bill")
+                                if data_nl:
+                                    if isinstance(data_nl, list) and len(data_nl) > 0:
+                                        yield await self._start_bill(event, user_id, [text_nl], text_nl)
+                                        return
+                                    if isinstance(data_nl, dict) and data_nl.get("amount") is not None:
+                                        yield await self._start_bill(event, user_id, [text_nl], text_nl)
+                                        return
+                            except Exception:
+                                pass
+                            # 正则兜底
+                            try:
+                                parsed_nl, _ = parse_bill(text_nl)
+                                if parsed_nl:
+                                    yield await self._start_bill(event, user_id, [text_nl], text_nl)
+                                    return
+                            except Exception:
+                                pass
+                            try:
+                                batch_nl, _ = parse_bills_batch(text_nl)
+                                if batch_nl and len(batch_nl) > 0:
+                                    yield await self._start_bill(event, user_id, [text_nl], text_nl)
+                                    return
+                            except Exception:
+                                pass
+                        # 日程：需含强日程关键词，避免“今天天气不错”误判
+                        is_schedule_like = any(
+                            kw in text_nl for kw in ["开会", "日程", "提醒", "会议", "生日", "纪念日", "节假日", "分钟后", "小时后", "半小时后", "后天"]
+                        ) or (
+                            re.search(r"\d+\s*月\d+\s*日|\d+[.\-]\d+|明天.*\d+点|今天.*\d+点", text_nl) is not None
+                        )
+                        if is_schedule_like:
+                            try:
+                                data_nl = await self._try_ai_extract(text_nl, "schedule")
+                                if data_nl:
+                                    yield await self._start_schedule(event, user_id, [text_nl], text_nl)
+                                    return
+                            except Exception:
+                                pass
+                            try:
+                                parsed_nl, _ = parse_schedule(text_nl)
+                                if parsed_nl:
+                                    yield await self._start_schedule(event, user_id, [text_nl], text_nl)
+                                    return
+                                batch_nl, _ = parse_schedules_batch(text_nl)
+                                if batch_nl:
+                                    yield await self._start_schedule(event, user_id, [text_nl], text_nl)
+                                    return
+                            except Exception:
+                                pass
                 return
 
             # 非白名单用户：静默忽略，不回复（避免抢占其他插件/AI 的消息处理）
@@ -1065,6 +1279,9 @@ class BlogWriter(Star):
                 return
             if cmd == "提醒":
                 yield self._handle_remind(event, user_id, args)
+                return
+            if cmd == "模型":
+                yield await self._handle_models(event)
                 return
             if cmd == "发布":
                 yield await self._publish(event, user_id)
@@ -1160,20 +1377,72 @@ class BlogWriter(Star):
                         yield event.plain_result(
                             "相册只接收图片。请直接发图片，或发 /发布 提交、/取消 放弃。"
                         )
-                    elif session.kind == "bill":
-                        # 空会话后下一句口语：尝试 AI 抽取，否则正则兜底
+                    elif session.kind in ("bill", "bill_batch"):
+                        # 空会话后下一句口语：尝试 AI 抽取，否则正则兜底（支持批量）
                         data = await self._try_ai_extract(text, "bill")
                         if data:
-                            normalized = self._normalize_bill_data(data, text)
-                            if normalized:
-                                session.meta.update(normalized)
-                                session.touch()
-                                yield event.plain_result(
-                                    "已识别账单：{} 金额{}。发 /发布 提交，发 /取消 放弃。".format(
-                                        normalized.get("title"), normalized.get("amount")
+                            if isinstance(data, list):
+                                normalized_list = []
+                                for item in data:
+                                    norm = self._normalize_bill_data(item, text)
+                                    if norm:
+                                        if norm.get("account") == "其他":
+                                            default_acc = self._cfg("bill_default_account", "其他")
+                                            if default_acc in BILL_ACCOUNTS:
+                                                norm["account"] = default_acc
+                                        if norm.get("category") == "其他":
+                                            default_cat = self._cfg("bill_default_category", "其他")
+                                            if default_cat in BILL_CATEGORIES:
+                                                norm["category"] = default_cat
+                                        normalized_list.append(norm)
+                                if normalized_list:
+                                    session.kind = "bill_batch"
+                                    session.meta = {"items": normalized_list}
+                                    session.touch()
+                                    titles = "、".join(f"{x['title']}{x['amount']}" for x in normalized_list[:5])
+                                    yield event.plain_result(f"已识别 {len(normalized_list)} 笔账单：{titles}，发 /发布 批量提交。")
+                                    return
+                            else:
+                                normalized = self._normalize_bill_data(data, text)
+                                if normalized:
+                                    if normalized.get("account") == "其他":
+                                        default_acc = self._cfg("bill_default_account", "其他")
+                                        if default_acc in BILL_ACCOUNTS:
+                                            normalized["account"] = default_acc
+                                    if normalized.get("category") == "其他":
+                                        default_cat = self._cfg("bill_default_category", "其他")
+                                        if default_cat in BILL_CATEGORIES:
+                                            normalized["category"] = default_cat
+                                    session.meta.update(normalized)
+                                    session.kind = "bill"
+                                    session.touch()
+                                    yield event.plain_result(
+                                        "已识别账单：{} 金额{}。发 /发布 提交，发 /取消 放弃。".format(
+                                            normalized.get("title"), normalized.get("amount")
+                                        )
                                     )
-                                )
+                                    return
+                        # 批量正则兜底
+                        try:
+                            batch, _ = parse_bills_batch(text)
+                            if batch and len(batch) > 1:
+                                for item in batch:
+                                    if item.get("account") == "其他":
+                                        default_acc = self._cfg("bill_default_account", "其他")
+                                        if default_acc in BILL_ACCOUNTS:
+                                            item["account"] = default_acc
+                                    if item.get("category") == "其他":
+                                        default_cat = self._cfg("bill_default_category", "其他")
+                                        if default_cat in BILL_CATEGORIES:
+                                            item["category"] = default_cat
+                                session.kind = "bill_batch"
+                                session.meta = {"items": batch}
+                                session.touch()
+                                titles = "、".join(f"{x['title']}{x['amount']}" for x in batch[:5])
+                                yield event.plain_result(f"已识别 {len(batch)} 笔账单：{titles}，发 /发布 批量提交。")
                                 return
+                        except Exception:
+                            pass
                         parsed, err = parse_bill(text)
                         if parsed:
                             # 应用默认值
@@ -1186,6 +1455,7 @@ class BlogWriter(Star):
                                 if default_cat in BILL_CATEGORIES:
                                     parsed["category"] = default_cat
                             session.meta.update(parsed)
+                            session.kind = "bill"
                             session.touch()
                             yield event.plain_result(
                                 "已识别账单：{} 金额{}。发 /发布 提交，发 /取消 放弃。".format(
@@ -1194,7 +1464,7 @@ class BlogWriter(Star):
                             )
                         else:
                             yield event.plain_result("账单解析失败：{}，请重发。".format(err))
-                    elif session.kind == "schedule":
+                    elif session.kind in ("schedule", "schedule_batch"):
                         data = await self._try_ai_extract(text, "schedule")
                         if data:
                             normalized = self._normalize_schedule_data(data, text)
@@ -1422,6 +1692,29 @@ class BlogWriter(Star):
                 slug = clean_filename_part(title)
                 path = "src/content/bills/{}-{}.md".format(now.strftime("%Y-%m-%d"), slug)
                 link = "/bills/{}".format(slug)
+            elif session.kind == "bill_batch":
+                items = session.meta.get("items") or []
+                if not items:
+                    return event.plain_result("批量账单为空，无法发布。")
+                success = 0
+                fails = []
+                for item in items:
+                    try:
+                        md_item = build_bill_md(item, now)
+                        title_item = str(item.get("title") or "账单").strip() or "账单"
+                        slug_item = clean_filename_part(title_item)
+                        path_item = "src/content/bills/{}-{}.md".format(now.strftime("%Y-%m-%d"), slug_item)
+                        ok_item, final_item, err_item = await self._commit_md(path_item, md_item, now)
+                        if ok_item:
+                            success += 1
+                        else:
+                            fails.append(f"{title_item}:{err_item}")
+                    except Exception as e:
+                        fails.append(f"{item.get('title','?')}:{e}")
+                self._sessions.pop(user_id, None)
+                if fails:
+                    return event.plain_result(f"批量账单发布完成：成功{success}条，失败{len(fails)}条：{'; '.join(fails[:3])}")
+                return event.plain_result(f"批量账单发布成功 ✅ 共{success}条，已写入 bills。")
             elif session.kind == "schedule":
                 if not session.meta or not session.meta.get("title"):
                     return event.plain_result("日程信息不完整，请先发送日程内容。")

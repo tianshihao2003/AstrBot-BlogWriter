@@ -98,5 +98,20 @@
     "description": "启用 AI 自然语言记账/日程（关闭则仅正则）",
     "type": "bool",
     "default": true
+  },
+  "ai_api_key": {
+    "description": "AI API Key（为空则用全局 LLM；opencodego 的 Key 填这里）",
+    "type": "string",
+    "default": ""
+  },
+  "ai_base_url": {
+    "description": "AI Base URL（OpenAI 兼容，如 https://api.opencodego.com/v1，空则用全局）",
+    "type": "string",
+    "default": ""
+  },
+  "ai_model": {
+    "description": "AI 模型ID（如 muse-spark-1.2 / gpt-4o-mini / qwen-turbo，空则用全局；可用 /模型列表 获取）",
+    "type": "string",
+    "default": ""
   }
 }

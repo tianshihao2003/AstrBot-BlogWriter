@@ -21,7 +21,7 @@ def now_shanghai() -> datetime:
 SESSION_TIMEOUT = timedelta(minutes=30)
 MAX_PATH_SUFFIX = 10
 
-COMMANDS = ("动态", "笔记", "足迹", "友链", "相册", "账单", "日程", "提醒", "发布", "取消", "状态", "帮助")
+COMMANDS = ("动态", "笔记", "足迹", "友链", "相册", "账单", "日程", "提醒", "模型", "发布", "取消", "状态", "帮助")
 
 BILL_CATEGORIES = ["餐饮", "交通", "住房", "工资", "居家生活", "交流通讯", "食品酒水", "职业收入", "人情收礼", "其他"]
 BILL_ACCOUNTS = ["微信", "支付宝", "银行卡", "现金", "其他"]
@@ -700,6 +700,67 @@ def _detect_bill_account(text: str) -> str:
     return "其他"
 
 
+def parse_bills_batch(text: str, now=None) -> Tuple[List[Dict], str]:
+    """批量解析多条账单（用于一句含多个金额的口语，如“午餐30晚餐45打车12”）。"""
+    now = now or now_shanghai()
+    raw = (text or "").strip()
+    if not raw:
+        return [], "内容为空"
+    # 按常见分隔符拆分：， 、 。 ； 换行 以及“和/与/ plus”
+    parts = re.split(r"[，。,；;、\n]+", raw)
+    # 若只有一段但含多个金额，按金额切分
+    expanded: List[str] = []
+    for p in parts:
+        p = p.strip()
+        if not p:
+            continue
+        # 若一段含多个金额，按金额切（保留金额前的文本）
+        amounts = list(re.finditer(r"-?\d+(?:\.\d+)?\s*(?:块|元|￥)?", p))
+        if len(amounts) > 1:
+            # 按金额位置切分
+            last = 0
+            for idx, m in enumerate(amounts):
+                start = max(0, m.start() - 10)
+                # 向前找分隔
+                seg_start = last
+                if idx < len(amounts) - 1:
+                    seg_end = amounts[idx + 1].start()
+                    seg = p[seg_start:seg_end].strip(" ，,。")
+                else:
+                    seg = p[seg_start:].strip(" ，,。")
+                if seg:
+                    expanded.append(seg)
+                last = m.end()
+                # 下一次从金额后开始，避免重叠
+            # 若切分后仍只有1段，说明金额紧密，改按金额数量直接拆
+            if len(expanded) <= 1:
+                expanded = [p]
+        else:
+            expanded.append(p)
+    # 若拆分后仍只有1段但含多个金额，尝试按“和/与/，”再拆
+    if len(expanded) == 1 and len(re.findall(r"-?\d+(?:\.\d+)?\s*(?:块|元|￥)?", raw)) > 1:
+        # 按金额直接拆全文
+        expanded = []
+        for m in re.finditer(r"([^，。,；;、\n]*?-?\d+(?:\.\d+)?\s*(?:块|元|￥)?[^，。,；;、\n]*)", raw):
+            seg = m.group(1).strip(" ，,。")
+            if seg:
+                expanded.append(seg)
+    results: List[Dict] = []
+    for seg in expanded:
+        seg = seg.strip()
+        if not seg:
+            continue
+        # 必须含金额才算一条账单
+        if not re.search(r"-?\d+(?:\.\d+)?\s*(?:块|元|￥)?", seg):
+            continue
+        data, err = parse_bill(seg, now)
+        if data:
+            results.append(data)
+    if not results:
+        return [], "未识别到账单信息"
+    return results, ""
+
+
 def parse_bill(text: str, now=None) -> Tuple[Optional[Dict], str]:
     """解析账单自然语言。返回 (data, err)，err 为空表示成功。
 
@@ -814,7 +875,8 @@ def _parse_schedule_date(text: str, now: datetime) -> datetime:
     # 相对时间“2分钟后/3小时后”等视为今天，避免被误判为全天
     if re.search(r"(\d+\s*(?:分钟|分|小时|时|天|周)\s*后|半小时后)", text):
         return now.replace(hour=0, minute=0, second=0, microsecond=0)
-    m = re.search(r"(今天|明天|昨天|后天|\d{4}-\d{2}-\d{2}|\d{1,2}月\d{1,2}日)", text)
+    # 支持 今天/明天/后天/2026-08-24/8月24日/8月24/8.24/8-24
+    m = re.search(r"(今天|明天|昨天|后天|\d{4}-\d{2}-\d{2}|\d{1,2}月\d{1,2}日?|\d{1,2}[.\-]\d{1,2})", text)
     base = now.replace(hour=0, minute=0, second=0, microsecond=0)
     if not m:
         return base
@@ -838,6 +900,22 @@ def _parse_schedule_date(text: str, now: datetime) -> datetime:
         try:
             month = int(m2.group(1))
             day = int(m2.group(2))
+            return datetime(now.year, month, day)
+        except ValueError:
+            return base
+    m3 = re.match(r"^(\d{1,2})月(\d{1,2})$", token)
+    if m3:
+        try:
+            month = int(m3.group(1))
+            day = int(m3.group(2))
+            return datetime(now.year, month, day)
+        except ValueError:
+            return base
+    m4 = re.match(r"^(\d{1,2})[.\-](\d{1,2})$", token)
+    if m4:
+        try:
+            month = int(m4.group(1))
+            day = int(m4.group(2))
             return datetime(now.year, month, day)
         except ValueError:
             return base
