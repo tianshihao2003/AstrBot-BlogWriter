@@ -8,8 +8,15 @@ import base64
 import json
 import re
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
+
+SHANGHAI_TZ = timezone(timedelta(hours=8))
+
+
+def now_shanghai() -> datetime:
+    return datetime.now(SHANGHAI_TZ).replace(tzinfo=None)
+
 
 SESSION_TIMEOUT = timedelta(minutes=30)
 MAX_PATH_SUFFIX = 10
@@ -115,12 +122,12 @@ def extract_tags(text: str) -> Tuple[str, List[str]]:
 # ---------- 文件名与 id ----------
 
 def gen_moment_id(now: datetime = None) -> str:
-    now = now or datetime.now()
+    now = now or now_shanghai()
     return "ext-" + str(int(now.timestamp() * 1000))
 
 
 def format_moment_published(now: datetime = None) -> str:
-    now = now or datetime.now()
+    now = now or now_shanghai()
     return now.strftime("%Y-%m-%d %H:%M:%S")
 
 
@@ -210,7 +217,7 @@ def build_moment_md(
     2026-08-13 起博客不再按条写 author/avatar（content.config.ts 已提供 schema 默认值，
     全部旧文件已清理），故这里不再生成这两个字段。
     """
-    now = now or datetime.now()
+    now = now or now_shanghai()
     fm = {
         "published": format_moment_published(now),
         "tags": tags,
@@ -221,7 +228,7 @@ def build_moment_md(
 
 
 def build_note_md(name: str, content: str, image_urls: List[str], day: datetime = None) -> str:
-    day = day or datetime.now()
+    day = day or now_shanghai()
     fm = {"date": day.strftime("%Y-%m-%d"), "name": name}
     body = content.strip()
     for url in image_urls:
@@ -239,7 +246,7 @@ def build_place_md(
     tags: List[str],
     day: datetime = None,
 ) -> str:
-    day = day or datetime.now()
+    day = day or now_shanghai()
     fm = {
         "date": day.strftime("%Y-%m-%d"),
         "province": province,
@@ -260,7 +267,7 @@ def build_album_md(title: str, folder: str, day: datetime = None) -> str:
 
     imgbedFolder 指向图床目录，博客详情页运行时动态拉图，故照片不进 md。
     """
-    day = day or datetime.now()
+    day = day or now_shanghai()
     fm = {
         "title": title,
         "date": day.strftime("%Y-%m-%d"),
@@ -599,14 +606,14 @@ class Session:
         self.text_parts: List[str] = []
         # 元素为 (来源引用, 图片字节)。图片在收到消息时立即读取，避免临时文件被清理。
         self.images: List[Tuple[str, bytes]] = []
-        self.created_at = created_at or datetime.now()
+        self.created_at = created_at or now_shanghai()
         self.last_active = self.created_at
 
     def touch(self, now: datetime = None) -> None:
-        self.last_active = now or datetime.now()
+        self.last_active = now or now_shanghai()
 
     def expired(self, now: datetime = None, timeout: timedelta = None) -> bool:
-        now = now or datetime.now()
+        now = now or now_shanghai()
         return now - self.last_active > (timeout or SESSION_TIMEOUT)
 
     def add_text(self, text: str) -> None:
@@ -698,7 +705,7 @@ def parse_bill(text: str, now=None) -> Tuple[Optional[Dict], str]:
 
     data 包含：title, amount, type(expense/income), category, account, date(datetime), description
     """
-    now = now or datetime.now()
+    now = now or now_shanghai()
     raw = (text or "").strip()
     if not raw:
         return None, "内容为空"
@@ -840,7 +847,7 @@ def _parse_schedule_date(text: str, now: datetime) -> datetime:
 def _parse_schedule_time(text: str, base_date: datetime, now: datetime = None) -> Tuple[datetime, bool]:
     """解析时间，返回 (datetime, has_time)。支持绝对时间与相对时间 2分钟后/半小时后"""
     # 相对时间优先：2分钟后 / 3小时后 / 半小时后 等，基准用传入的 now（保持测试可控）
-    _now = now or datetime.now()
+    _now = now or now_shanghai()
     m_rel = re.search(r"(\d+)\s*分钟后", text)
     if m_rel:
         try:
@@ -961,7 +968,7 @@ def parse_schedule(text: str, now=None) -> Tuple[Optional[Dict], str]:
 
     data 包含：title, date(datetime), priority, location, repeat, remind_before(int), allDay(bool)
     """
-    now = now or datetime.now()
+    now = now or now_shanghai()
     raw = (text or "").strip()
     if not raw:
         return None, "内容为空"
@@ -1028,7 +1035,7 @@ def parse_schedule(text: str, now=None) -> Tuple[Optional[Dict], str]:
 
 def build_bill_md(data: Dict, now=None) -> str:
     """生成账单 markdown（含 YAML frontmatter）"""
-    now = now or datetime.now()
+    now = now or now_shanghai()
     title = str(data.get("title") or data.get("description") or "账单").strip() or "账单"
     amount = data.get("amount", 0)
     type_ = data.get("type", "expense")
@@ -1064,7 +1071,7 @@ def build_bill_md(data: Dict, now=None) -> str:
 
 def build_schedule_md(data: Dict, now=None) -> str:
     """生成日程 markdown（含 YAML frontmatter）"""
-    now = now or datetime.now()
+    now = now or now_shanghai()
     title = str(data.get("title") or "日程").strip() or "日程"
     date_val = data.get("date") or now
     if isinstance(date_val, datetime):

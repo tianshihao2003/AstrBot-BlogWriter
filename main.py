@@ -24,11 +24,17 @@ import json
 import os
 import re
 import urllib.parse
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import httpx
+
+SHANGHAI_TZ = timezone(timedelta(hours=8))
+
+
+def now_shanghai() -> datetime:
+    return datetime.now(SHANGHAI_TZ).replace(tzinfo=None)
 
 try:
     from apscheduler.schedulers.background import BackgroundScheduler
@@ -230,7 +236,7 @@ class BlogWriter(Star):
                 for item in self._load_reminders():
                     try:
                         remind_at = datetime.fromisoformat(item["remind_at"])
-                        if remind_at <= datetime.now():
+                        if remind_at <= now_shanghai():
                             continue
                         self._reminders.append((item["user_id"], item["title"], remind_at))
                     except Exception:
@@ -242,7 +248,7 @@ class BlogWriter(Star):
             for item in self._load_reminders():
                 try:
                     remind_at = datetime.fromisoformat(item["remind_at"])
-                    if remind_at <= datetime.now():
+                    if remind_at <= now_shanghai():
                         continue
                     self._reminders.append((item["user_id"], item["title"], remind_at))
                     self._scheduler.add_job(
@@ -326,7 +332,7 @@ class BlogWriter(Star):
         return result
 
     def _sweep(self) -> None:
-        now = datetime.now()
+        now = now_shanghai()
         expired = [uid for uid, s in self._sessions.items() if s.expired(now)]
         for uid in expired:
             del self._sessions[uid]
@@ -360,7 +366,7 @@ class BlogWriter(Star):
         # 动态填充时间基准，避免 LLM 看到字面量 {now}
         if kind == "schedule":
             try:
-                _now = datetime.now()
+                _now = now_shanghai()
                 _now_plus_2m = (_now + timedelta(minutes=2)).strftime("%Y-%m-%d %H:%M:%S")
                 prompt = prompt.format(now=_now.strftime("%Y-%m-%d %H:%M:%S"), now_plus_2m=_now_plus_2m)
             except Exception:
@@ -466,7 +472,7 @@ class BlogWriter(Star):
                 if account not in BILL_ACCOUNTS:
                     account = "其他"
             date_val = data.get("date")
-            now = datetime.now()
+            now = now_shanghai()
             if isinstance(date_val, datetime):
                 dt = date_val
             elif isinstance(date_val, str) and date_val.strip():
@@ -520,7 +526,7 @@ class BlogWriter(Star):
                 if not title:
                     title = "日程"
             date_val = data.get("date")
-            now = datetime.now()
+            now = now_shanghai()
             dt = None
             all_day = data.get("allDay")
             if isinstance(date_val, datetime):
@@ -627,7 +633,7 @@ class BlogWriter(Star):
     def _schedule_remind(self, user_id: str, title: str, remind_at: datetime) -> None:
         """持久化调度：写入 json + APScheduler 定时，到点私聊提醒。 past 则不调度。"""
         try:
-            if remind_at <= datetime.now():
+            if remind_at <= now_shanghai():
                 logger.info("BlogWriter: 提醒时间已过，不调度 user=%s title=%s at=%s", user_id, title, remind_at)
                 return
             logger.info("BlogWriter: 调度提醒 user=%s title=%s at=%s", user_id, title, remind_at)
@@ -640,7 +646,7 @@ class BlogWriter(Star):
                 rid = f"{user_id}_{title}_{remind_at.isoformat()}"
                 data.append({"id": rid, "user_id": user_id, "title": title, "remind_at": remind_at.isoformat()})
                 # 只保留未来 100 条
-                data = [d for d in data if datetime.fromisoformat(d["remind_at"]) > datetime.now() - timedelta(days=1)][-100:]
+                data = [d for d in data if datetime.fromisoformat(d["remind_at"]) > now_shanghai() - timedelta(days=1)][-100:]
                 self._save_reminders(data)
             except Exception as e:
                 logger.warning("BlogWriter: 保存提醒持久化失败: %s", e)
@@ -769,7 +775,7 @@ class BlogWriter(Star):
         # 列表
         try:
             data = self._load_reminders()
-            mine = [d for d in data if d["user_id"] == user_id and datetime.fromisoformat(d["remind_at"]) > datetime.now()]
+            mine = [d for d in data if d["user_id"] == user_id and datetime.fromisoformat(d["remind_at"]) > now_shanghai()]
             if not mine:
                 # 兼容旧内存
                 if hasattr(self, "_reminders") and self._reminders:
@@ -1147,7 +1153,7 @@ class BlogWriter(Star):
 
         # 2. 生成 markdown
         try:
-            now = datetime.now()
+            now = now_shanghai()
             if session.kind == "moment":
                 md = build_moment_md(
                     content,
