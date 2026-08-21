@@ -292,10 +292,22 @@ class BlogWriter(Star):
         try:
             logger.info("BlogWriter: 到点提醒 user=%s title=%s origin=%s", user_id, title, origin)
             sent = False
-            # 1. 优先用 origin + MessageChain（按 AstrBot 标准构造）
+            # 1. 优先用 origin + MessageChain（按 AstrBot 官方文档：MessageChain().message() + send_message(origin, chain)）
             if origin and hasattr(self.context, "send_message"):
-                # 尝试构造 MessageChain，兼容不同版本的导入路径
                 def _make_chain(text: str):
+                    # 标准构造：from astrbot.core.message.message_event_result import MessageChain
+                    try:
+                        from astrbot.core.message.message_event_result import MessageChain as _MC  # type: ignore
+
+                        try:
+                            return _MC().message(text)  # type: ignore
+                        except Exception:
+                            try:
+                                return _MC(chain=[Plain(text)])  # type: ignore
+                            except Exception:
+                                return _MC([Plain(text)])  # type: ignore
+                    except ImportError:
+                        pass
                     try:
                         from astrbot.core.message.message import MessageChain as _MC1  # type: ignore
 
@@ -312,10 +324,7 @@ class BlogWriter(Star):
                         try:
                             from astrbot.core.message.components import MessageChain as _MC2  # type: ignore
 
-                            try:
-                                return _MC2(chain=[Plain(text)])  # type: ignore
-                            except Exception:
-                                return _MC2([Plain(text)])  # type: ignore
+                            return _MC2([Plain(text)])  # type: ignore
                         except ImportError:
                             return [Plain(text)]  # type: ignore
                     except Exception:
