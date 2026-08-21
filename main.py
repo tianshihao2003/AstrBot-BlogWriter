@@ -1032,27 +1032,35 @@ class BlogWriter(Star):
                             norm["remind_before"] = self._cfg("schedule_remind_before", 10)
                         normalized_list.append(norm)
                 if normalized_list:
-                    self._sessions[user_id] = Session("schedule_batch", {"items": normalized_list})
-                    titles = "、".join(x["title"] for x in normalized_list[:5])
-                    more = f"等{len(normalized_list)}条" if len(normalized_list) > 5 else ""
-                    return event.plain_result(f"已识别 {len(normalized_list)} 条：{titles}{more}，发 /发布 批量提交，发 /取消 放弃。")
+                    # 若 AI 批量只回 1 条但原文明显含多条（如 6 个日期），视为漏判，走正则批量兜底
+                    if len(normalized_list) == 1 and len(re.findall(r"\d+[.\-月]\d+", text)) > 1 and len(text) > 30:
+                        pass
+                    else:
+                        self._sessions[user_id] = Session("schedule_batch", {"items": normalized_list})
+                        titles = "、".join(x["title"] for x in normalized_list[:5])
+                        more = f"等{len(normalized_list)}条" if len(normalized_list) > 5 else ""
+                        return event.plain_result(f"已识别 {len(normalized_list)} 条：{titles}{more}，发 /发布 批量提交，发 /取消 放弃。")
             else:
                 normalized = self._normalize_schedule_data(data, text)
                 if normalized:
-                    if normalized.get("priority") == "none":
-                        default_p = self._cfg("schedule_default_priority", "none")
-                        if default_p in SCHEDULE_PRIORITIES:
-                            normalized["priority"] = default_p
-                    if normalized.get("remind_before") is None:
-                        normalized["remind_before"] = self._cfg("schedule_remind_before", 10)
-                    self._sessions[user_id] = Session("schedule", normalized)
-                    return event.plain_result(
-                        "已识别日程：{} 时间{} 优先级{}。发 /发布 提交，发 /取消 放弃。".format(
-                            normalized.get("title"),
-                            normalized.get("date").strftime("%Y-%m-%d %H:%M:%S") if isinstance(normalized.get("date"), datetime) else normalized.get("date"),
-                            normalized.get("priority"),
+                    # 若原文含多个日期但 AI 只回单条，视为批量漏判，不直接返回单条，走正则批量
+                    if len(re.findall(r"\d+[.\-月]\d+", text)) > 1 and len(normalized.get("title","")) > 20 and len(text) > 40:
+                        pass
+                    else:
+                        if normalized.get("priority") == "none":
+                            default_p = self._cfg("schedule_default_priority", "none")
+                            if default_p in SCHEDULE_PRIORITIES:
+                                normalized["priority"] = default_p
+                        if normalized.get("remind_before") is None:
+                            normalized["remind_before"] = self._cfg("schedule_remind_before", 10)
+                        self._sessions[user_id] = Session("schedule", normalized)
+                        return event.plain_result(
+                            "已识别日程：{} 时间{} 优先级{}。发 /发布 提交，发 /取消 放弃。".format(
+                                normalized.get("title"),
+                                normalized.get("date").strftime("%Y-%m-%d %H:%M:%S") if isinstance(normalized.get("date"), datetime) else normalized.get("date"),
+                                normalized.get("priority"),
+                            )
                         )
-                    )
         # 批量正则兜底
         try:
             from blog_writer_core import parse_schedules_batch  # type: ignore
