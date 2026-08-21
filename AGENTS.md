@@ -1,6 +1,6 @@
 # AGENTS.md
 
-AstrBot BlogWriter 插件：通过微信（weixin_oc）对话把内容发布到静态博客仓库 `tianshihao2003/dumplingandcakeblog`（Firefly Astro）。内容类型：动态（moments）、笔记（notebooks）、足迹（places）、友链（friends）、相册（album）。流程：图片上传 CloudFlare-ImgBed → 生成 markdown（对齐博客 zod schema）→ GitHub API 提交 main 分支 → Actions 构建 + EdgeOne Pages 部署。
+AstrBot BlogWriter 插件：通过微信（weixin_oc）对话把内容发布到静态博客仓库 `tianshihao2003/dumplingandcakeblog`（Firefly Astro）。内容类型：动态（moments）、笔记（notebooks）、足迹（places）、友链（friends）、相册（album）、账单（bills）、日程（schedules，支持 AI 自然语言 + 微信提醒）。流程：图片上传 CloudFlare-ImgBed → 生成 markdown（对齐博客 zod schema）→ GitHub API 提交 main 分支 → Actions 构建 + EdgeOne Pages 部署。
 
 先读文档：`DESIGN.md`（已批准的完整设计，含协议与规则）、`README.md`（安装/配置/使用）。
 
@@ -95,7 +95,9 @@ EOF
 - 会话：30 分钟超时、每用户同时仅一个会话、`allow_users` 白名单（空 = 全部拒绝）；**非白名单或无关消息必须静默放行**，不得抢占其他插件/AI。
 - 图床上传目录：动态/笔记/足迹照片统一用 `imgbed_upload_folder`（默认 `blog/moments`，与博客惯例一致）；友链无图片。
 - 相册：`/相册 相册名` 会话只收图片；**存在性按 title/文件名判断**（列出 `src/content/album/` 解析每个文件的 title/imgbedFolder，博客文件名与 title 不一定相同，如 `xiangce1.md` 的 title 是「测试相册」）；命中则只传图不写文件、照片上传到**命中相册自己的 imgbedFolder**（不触发构建，博客详情页运行时从图床动态拉图）；未命中才创建仅含 `title`/`date`/`imgbedFolder` 的 md，不生成 `-1` 后缀。
-- 动态媒体：GIF 走 Image 组件（`.gif` 已在白名单）；视频走 `Video` 组件（微信适配器下载到本地 `.mp4`），**仅动态会话接收**（`_extract_images(allow_video=...)`，笔记/足迹/相册仍只收图片），URL 与图片一样进 `images` 数组；大小上限视频 100MB/图片 20MB；微信 raw_message type 5（video_item）兜底 ref 带 `.mp4` 后缀。
+- 动态媒体：GIF 走 Image 组件（`.gif` 已在白名单）；视频走 `Video` 组件（微信适配器下载到本地 `.mp4`），**仅动态会话接收**（`_extract_images(allow_video=...)`，笔记/足迹/相册/账单/日程仍只收图片，账单/日程为文本会话），URL 与图片一样进 `images` 数组；大小上限视频 100MB/图片 20MB；微信 raw_message type 5（video_item）兜底 ref 带 `.mp4` 后缀。
+- **账单**：`/账单` 支持自然语言（`今天午餐微信花了32`/`发工资12000`）→ AI 主抽取 `amount/type/category/account/date/description`，失败走正则兜底；金额必抓（`块/元/￥`），分类/账户白名单优先匹配未命中则新建；路径 `src/content/bills/YYYY-MM-DD-{slug}.md`（`slug=clean_filename_part(title or category)`），冲突 `-1..-10`；`amount` 正收入负支出，`type` 自动 `income/expense`
+- **日程**：`/日程` 支持自然语言（`明天下午3点高优在会议室A开周会 每周重复 提前15分钟`）→ AI 主抽取 `title/date/allDay/priority/location/repeat/remind_before`，失败走正则；时间基准 `now`，`allDay` 无时间则真，`priority` 映射 `高→high` 等，`repeat` 命中 `每天/每周/每月/每年`，`remind_before` 抽“提前N分钟”否则取配置 `schedule_remind_before`（默认 10，0 为准点）；路径 `src/content/schedules/YYYY-MM-DD-{slug}.md`；**提醒**：含时间且非全天的日程，`remind_at = date - remind_before`，`apscheduler` 持久化到 `data/schedules_reminder.json`，重启通过 `_restore_reminders` 恢复，到点 `weixin_oc` 私聊 `🔔 日程提醒`，支持 `/提醒 列表/取消`
 - 所有失败路径返回明确中文错误信息并写日志。
 
 ## 环境

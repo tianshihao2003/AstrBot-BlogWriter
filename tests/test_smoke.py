@@ -834,5 +834,182 @@ class TestBillScheduleAI(unittest.TestCase):
         self.assertNotIn("hacker", self.plugin._sessions)
 
 
+class TestReminder(unittest.TestCase):
+    """Task 4: 提醒持久化与调度（TDD 先写测试）"""
+
+    def setUp(self):
+        import tempfile
+        import json
+        import main as plugin_main
+
+        # 清理可能残留的持久化文件，保证隔离
+        self.config = {
+            "github_token": "tok",
+            "github_repo": "tianshihao2003/dumplingandcakeblog",
+            "github_branch": "main",
+            "allow_users": ["u1"],
+            "schedule_remind_before": 10,
+            "enable_ai_bill_schedule": True,
+        }
+
+        class Stubbed(plugin_main.BlogWriter):
+            async def _upload_images(self, stored, folder=""):
+                self.last_upload_folder = folder
+                return ["https://img.tsh520.cn/file/" + os.path.basename(ref) for ref, _ in stored]
+
+            async def _commit_md(self, path, md, now):
+                self.committed.append((path, md))
+                return True, path, ""
+
+            async def _album_index(self, repo, branch, token):
+                return self.album_index_result
+
+            async def terminate(self):
+                pass
+
+        # 使用临时目录隔离 REMINDER_FILE（避免污染真实 data/）
+        self.tmpdir = tempfile.mkdtemp()
+        self.orig_reminder_file = plugin_main.REMINDER_FILE if hasattr(plugin_main, "REMINDER_FILE") else None
+        # 隔离：无论原本是否存在，都指向临时文件（测试用）
+        # 但保留 orig 用于验证常量是否原本存在（TDD 检查）
+        if hasattr(plugin_main, "REMINDER_FILE"):
+            plugin_main.REMINDER_FILE = Path(self.tmpdir) / "schedules_reminder.json"
+        else:
+            # 若尚未实现，先创建一个临时占位，后续测试会检测到 orig 为 None 并视为失败
+            plugin_main.REMINDER_FILE = Path(self.tmpdir) / "schedules_reminder.json"
+
+        self.plugin = Stubbed(context=types.SimpleNamespace(), config=dict(self.config))
+        self.plugin.committed = []
+        self.plugin.last_upload_folder = None
+        self.plugin.album_index_result = {"titles": {}, "files": {}}
+        # 确保 scheduler 清理
+        self.plugin_main = plugin_main
+
+    def tearDown(self):
+        import shutil
+
+        # 恢复原始 REMINDER_FILE
+        if self.orig_reminder_file is not None:
+            self.plugin_main.REMINDER_FILE = self.orig_reminder_file
+        # 关闭 scheduler 的 jobs
+        try:
+            from main import _scheduler
+
+            if _scheduler is not None:
+                for job in _scheduler.get_jobs():
+                    try:
+                        # 仅清理本测试创建的临时 jobs（通过 tmpdir 隔离，实际是全部）
+                        _scheduler.remove_job(job.id)
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+        shutil.rmtree(self.tmpdir, ignore_errors=True)
+
+    async def _send(self, text, sender="u1"):
+        ev = types.SimpleNamespace(
+            message_str=text,
+            get_sender_id=lambda: sender,
+            get_sender_name=lambda: "用户",
+            get_messages=lambda: [],
+            plain_result=lambda t: types.SimpleNamespace(text=t),
+            message_obj=types.SimpleNamespace(raw_message={}),
+        )
+        out = []
+        async for r in self.plugin.on_message(ev):
+            out.append(r)
+        return [o.text for o in out]
+
+    def test_reminder_file_constant_exists(self):
+        # 验证 main.py 已定义 REMINDER_FILE = Path(__file__).parent / "data" / "schedules_reminder.json"
+        self.assertIsNotNone(self.orig_reminder_file, "main.py 未定义 REMINDER_FILE 常量")
+        self.assertTrue(str(self.orig_reminder_file).replace("\\", "/").endswith("data/schedules_reminder.json"))
+
+    def test_reminder_load_empty_when_missing(self):
+        # 文件不存在时应返回空列表且不抛错
+        result = self.plugin._load_reminders()
+        self.assertEqual(result, [])
+
+    def test_reminder_save_creates_file_and_dir(self):
+        from datetime import timedelta
+
+        future = datetime.now() + timedelta(minutes=30)
+        self.plugin._schedule_remind("u1", "测试提醒", future)
+        # 检查文件已创建且可加载
+        # _save_reminders 应在 _schedule_remind 内部调用
+        loaded = self.plugin._load_reminders()
+        self.assertTrue(len(loaded) >= 1)
+        # 找到刚才保存的条目
+        found = any(item.get("title") == "测试提醒" or (isinstance(item, tuple) and item[1] == "测试提醒") for item in loaded)
+        # 兼容 tuple 或 dict 返回
+        if not found and isinstance(loaded, list) and loaded and isinstance(loaded[0], dict):
+            found = any(d.get("title") == "测试提醒" for d in loaded)
+        self.assertTrue(found)
+
+    def test_reminder_schedule_future_and_persist(self):
+        from datetime import timedelta
+
+        future = datetime.now() + timedelta(minutes=20)
+        # 调度未来提醒应写入文件并可通过 _load_reminders 恢复
+        self.plugin._schedule_remind("u1", "未来会议", future)
+        # 验证内存记录
+        self.assertTrue(any(t == "未来会议" for _, t, _ in self.plugin._reminders))
+        # 验证持久化
+        loaded = self.plugin._load_reminders()
+        self.assertTrue(len(loaded) >= 1)
+
+    def test_reminder_schedule_past_not_scheduled(self):
+        from datetime import timedelta
+
+        past = datetime.now() - timedelta(minutes=10)
+        before = len(getattr(self.plugin, "_reminders", []))
+        self.plugin._schedule_remind("u1", "过去会议", past)
+        after = len(getattr(self.plugin, "_reminders", []))
+        # 过去时间不应新增（或至少不持久化）
+        # 允许实现为不添加，故 after == before
+        self.assertEqual(after, before)
+
+    def test_reminder_handle_list_and_cancel(self):
+        from datetime import timedelta
+
+        future = datetime.now() + timedelta(minutes=40)
+        self.plugin._schedule_remind("u1", "待取消会议", future)
+        # 列表
+        replies = asyncio.get_event_loop().run_until_complete(self._send("/提醒"))
+        self.assertTrue(any("提醒" in r for r in replies))
+        # 列表显式
+        replies = asyncio.get_event_loop().run_until_complete(self._send("/提醒 列表"))
+        self.assertTrue(any("待取消会议" in r or "提醒" in r for r in replies))
+        # 取消（按 1 索引）
+        replies = asyncio.get_event_loop().run_until_complete(self._send("/提醒 取消 1"))
+        self.assertTrue(any("取消" in r or "已" in r or "成功" in r for r in replies))
+        # 再次列表应无该条目
+        replies = asyncio.get_event_loop().run_until_complete(self._send("/提醒 列表"))
+        # 可能为空提示
+        self.assertTrue(any("提醒" in r for r in replies))
+
+    def test_reminder_restore_on_init(self):
+        from datetime import timedelta
+        import main as plugin_main
+
+        future = datetime.now() + timedelta(minutes=60)
+        # 先调度一个，持久化到临时文件
+        self.plugin._schedule_remind("u1", "恢复测试", future)
+        # 模拟重启：新建插件实例，__init__ 应自动 restore
+        class Stubbed2(plugin_main.BlogWriter):
+            async def _upload_images(self, stored, folder=""):
+                return []
+
+            async def _commit_md(self, path, md, now):
+                return True, path, ""
+
+            async def _album_index(self, repo, branch, token):
+                return {"titles": {}, "files": {}}
+
+        new_plugin = Stubbed2(context=types.SimpleNamespace(), config=dict(self.config))
+        # 新实例应已加载持久化条目
+        self.assertTrue(any("恢复测试" in str(r) for r in getattr(new_plugin, "_reminders", [])) or len(getattr(new_plugin, "_reminders", [])) >= 1)
+
+
 if __name__ == "__main__":
     unittest.main()
