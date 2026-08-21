@@ -9,15 +9,20 @@ from datetime import datetime, timedelta
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from blog_writer_core import (  # noqa: E402
+    BILL_ACCOUNTS,
+    BILL_CATEGORIES,
+    SCHEDULE_PRIORITIES,
     SESSION_TIMEOUT,
     Session,
     build_album_md,
     build_amap_url,
+    build_bill_md,
     build_github_put_body,
     build_imgbed_upload,
     build_moment_md,
     build_note_md,
     build_place_md,
+    build_schedule_md,
     build_upload_url,
     build_friend_md,
     clean_filename_part,
@@ -30,6 +35,7 @@ from blog_writer_core import (  # noqa: E402
     parse_album,
     parse_album_frontmatter,
     parse_amap_response,
+    parse_bill,
     parse_dynamic,
     parse_friend_text,
     parse_github_put_response,
@@ -37,6 +43,7 @@ from blog_writer_core import (  # noqa: E402
     parse_message,
     parse_note,
     parse_place,
+    parse_schedule,
     place_filename,
     upload_base_host,
     validate_friend_data,
@@ -511,6 +518,51 @@ class TestFriend(unittest.TestCase):
         self.assertEqual(next_friend_index(["01-a.md"]), 2)
         self.assertEqual(next_friend_index([]), 1)
         self.assertEqual(next_friend_index(["not-numbered.md"]), 1)
+
+
+class TestBillSchedule(unittest.TestCase):
+    def test_parse_bill_natural(self):
+        data, err = parse_bill("今天午餐微信花了32")
+        self.assertEqual(err, "")
+        self.assertEqual(data["amount"], -32)
+        self.assertEqual(data["category"], "餐饮")
+        self.assertEqual(data["account"], "微信")
+
+    def test_parse_bill_income(self):
+        data, _ = parse_bill("发工资12000 银行卡")
+        self.assertEqual(data["type"], "income")
+        self.assertEqual(data["amount"], 12000)
+
+    def test_build_bill_md(self):
+        md = build_bill_md(
+            {
+                "title": "午餐",
+                "amount": -32,
+                "type": "expense",
+                "category": "餐饮",
+                "account": "微信",
+                "date": datetime(2026, 8, 21),
+                "description": "午餐",
+            },
+            datetime(2026, 8, 21),
+        )
+        self.assertIn("amount: -32", md)
+        self.assertIn("category: 餐饮", md)
+
+    def test_parse_schedule_natural(self):
+        data, _ = parse_schedule("明天下午3点高优在会议室A开周会 每周重复 提前15分钟")
+        self.assertEqual(data["title"], "周会")
+        self.assertEqual(data["priority"], "high")
+        self.assertEqual(data["location"], "会议室A")
+        self.assertEqual(data["repeat"], "每周")
+        self.assertEqual(data["remind_before"], 15)
+
+    def test_build_schedule_md(self):
+        md = build_schedule_md(
+            {"title": "周会", "date": datetime(2026, 8, 22, 15, 0), "priority": "high", "location": "会议室A"},
+            datetime(2026, 8, 22),
+        )
+        self.assertIn("title: 周会", md)
 
 
 if __name__ == "__main__":

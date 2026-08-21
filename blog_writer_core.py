@@ -14,7 +14,11 @@ from typing import Any, Dict, List, Optional, Tuple
 SESSION_TIMEOUT = timedelta(minutes=30)
 MAX_PATH_SUFFIX = 10
 
-COMMANDS = ("动态", "笔记", "足迹", "友链", "相册", "发布", "取消", "状态", "帮助")
+COMMANDS = ("动态", "笔记", "足迹", "友链", "相册", "账单", "日程", "提醒", "发布", "取消", "状态", "帮助")
+
+BILL_CATEGORIES = ["餐饮", "交通", "住房", "工资", "居家生活", "交流通讯", "食品酒水", "职业收入", "人情收礼", "其他"]
+BILL_ACCOUNTS = ["微信", "支付宝", "银行卡", "现金", "其他"]
+SCHEDULE_PRIORITIES = ["none", "low", "medium", "high"]
 
 # ---------- 命令解析 ----------
 
@@ -613,3 +617,465 @@ class Session:
 
     def full_text(self) -> str:
         return "\n".join(p.strip() for p in self.text_parts if p.strip())
+
+
+# ---------- 账单 / 日程 ----------
+
+# 分类关键词映射（用于白名单分类匹配）
+_BILL_CATEGORY_KEYWORDS: Dict[str, List[str]] = {
+    "餐饮": ["餐饮", "午餐", "晚餐", "早餐", "早饭", "午饭", "晚饭", "夜宵", "吃饭", "外卖", "食堂", "餐厅", "饮食", "聚餐"],
+    "交通": ["交通", "打车", "地铁", "公交", "出行", "机票", "火车", "高铁", "出租", "滴滴", "通勤", "车费", "路费"],
+    "住房": ["住房", "房租", "房贷", "物业", "水电", "房费", "住房"],
+    "工资": ["工资"],
+    "居家生活": ["居家", "家用", "日用", "家居", "生活费", "居家生活"],
+    "交流通讯": ["交流", "通讯", "话费", "流量", "宽带", "手机费"],
+    "食品酒水": ["食品", "酒水", "零食", "饮料", "酒", "水果", "买菜", "超市"],
+    "职业收入": ["职业收入", "奖金", "绩效", "提成", "收入", "兼职"],
+    "人情收礼": ["人情", "收礼", "红包", "礼金", "请客", "随礼", "送礼"],
+    "其他": [],
+}
+
+# 账单类型关键词
+_BILL_EXPENSE_KEYWORDS = ["花了", "支出", "花费", "付款", "消费", "支付", "扣款", "买"]
+_BILL_INCOME_KEYWORDS = ["工资", "收入", "到账", "收款", "入账", "奖金", "发工资"]
+
+
+def _parse_bill_date(text: str, now: datetime) -> datetime:
+    """从文本中提取日期关键词，返回对应的 datetime（00:00:00）"""
+    m = re.search(r"(今天|明天|昨天|后天|\d{4}-\d{2}-\d{2}|\d{1,2}月\d{1,2}日)", text)
+    if not m:
+        return now.replace(hour=0, minute=0, second=0, microsecond=0)
+    token = m.group(1)
+    base = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    if token == "今天":
+        return base
+    if token == "明天":
+        return base + timedelta(days=1)
+    if token == "昨天":
+        return base - timedelta(days=1)
+    if token == "后天":
+        return base + timedelta(days=2)
+    if re.match(r"^\d{4}-\d{2}-\d{2}$", token):
+        try:
+            dt = datetime.strptime(token, "%Y-%m-%d")
+            return dt.replace(hour=0, minute=0, second=0, microsecond=0)
+        except ValueError:
+            return base
+    # m月d日
+    m2 = re.match(r"^(\d{1,2})月(\d{1,2})日$", token)
+    if m2:
+        try:
+            month = int(m2.group(1))
+            day = int(m2.group(2))
+            return datetime(now.year, month, day)
+        except ValueError:
+            return base
+    return base
+
+
+def _detect_bill_category(text: str) -> str:
+    # 优先精确命中分类名本身
+    for cat in BILL_CATEGORIES:
+        if cat in text:
+            return cat
+    # 再通过关键词映射
+    for cat, keywords in _BILL_CATEGORY_KEYWORDS.items():
+        for kw in keywords:
+            if kw and kw in text:
+                return cat
+    return "其他"
+
+
+def _detect_bill_account(text: str) -> str:
+    for acc in BILL_ACCOUNTS:
+        if acc in text:
+            return acc
+    return "其他"
+
+
+def parse_bill(text: str, now=None) -> Tuple[Optional[Dict], str]:
+    """解析账单自然语言。返回 (data, err)，err 为空表示成功。
+
+    data 包含：title, amount, type(expense/income), category, account, date(datetime), description
+    """
+    now = now or datetime.now()
+    raw = (text or "").strip()
+    if not raw:
+        return None, "内容为空"
+
+    # 金额提取：(-?\d+(\.\d+)?)\s*(块|元|￥)?
+    m = re.search(r"(-?\d+(?:\.\d+)?)\s*(?:块|元|￥)?", raw)
+    if not m:
+        return None, "未识别到金额"
+    try:
+        amount_val = float(m.group(1))
+    except ValueError:
+        return None, "金额解析失败"
+
+    # 类型判断
+    has_income = any(kw in raw for kw in _BILL_INCOME_KEYWORDS)
+    has_expense = any(kw in raw for kw in _BILL_EXPENSE_KEYWORDS)
+    if has_income:
+        type_ = "income"
+    elif has_expense:
+        type_ = "expense"
+    else:
+        # 无显式关键词时，默认 expense；若金额本身为负则 expense
+        type_ = "expense"
+
+    if type_ == "expense":
+        amount = -abs(amount_val)
+    else:
+        amount = abs(amount_val)
+    # 保持整数类型
+    if isinstance(amount, float) and amount == int(amount):
+        amount = int(amount)
+
+    category = _detect_bill_category(raw)
+    account = _detect_bill_account(raw)
+    date_val = _parse_bill_date(raw, now)
+
+    # 标题/描述提取：去除已知片段后剩余文本
+    cleaned = raw
+    # 去除日期词
+    cleaned = re.sub(r"(今天|明天|昨天|后天|\d{4}-\d{2}-\d{2}|\d{1,2}月\d{1,2}日)", "", cleaned)
+    # 去除账户
+    for acc in BILL_ACCOUNTS:
+        cleaned = cleaned.replace(acc, "")
+    # 去除金额（含可选单位）
+    cleaned = re.sub(r"(-?\d+(?:\.\d+)?)\s*(?:块|元|￥)?", "", cleaned)
+    # 去除类型动词（保留类别名词如 工资 餐饮 午餐 等，避免误删标题）
+    for kw in ["花了", "支出", "花费", "付款", "消费", "支付", "扣款"]:
+        cleaned = cleaned.replace(kw, "")
+    # 单独的 "发" 常见于 "发工资"
+    cleaned = re.sub(r"\b发\b", "", cleaned)
+    # 去除多余空白与标点
+    cleaned = re.sub(r"\s+", " ", cleaned).strip(" ，,。")
+    cleaned = cleaned.strip()
+    # 若清理后剩余为空或过短（单字），回退到类别或描述
+    if not cleaned or len(cleaned) <= 1:
+        if category != "其他":
+            cleaned = category
+        else:
+            # 尝试从原文提取名词片段（去除数字与账户后的首个词）
+            cleaned = raw
+            cleaned = re.sub(r"(-?\d+(?:\.\d+)?)\s*(?:块|元|￥)?", "", cleaned)
+            for acc in BILL_ACCOUNTS:
+                cleaned = cleaned.replace(acc, "")
+            cleaned = cleaned.replace("今天", "").replace("明天", "").replace("昨天", "").replace("后天", "")
+            for kw in ["花了", "支出", "花费", "付款", "消费", "支付", "扣款", "发"]:
+                cleaned = cleaned.replace(kw, "")
+            cleaned = re.sub(r"\s+", " ", cleaned).strip(" ，,。")
+            if not cleaned:
+                cleaned = category if category != "其他" else "账单"
+
+    # 标题与描述：标题取清理后前 20 字符，描述取清理后全文
+    title = cleaned[:20].strip() if cleaned else (category if category != "其他" else "账单")
+    description = cleaned if cleaned else title
+
+    data: Dict[str, Any] = {
+        "title": title,
+        "amount": amount,
+        "type": type_,
+        "category": category,
+        "account": account,
+        "date": date_val,
+        "description": description,
+    }
+    return data, ""
+
+
+# 日程相关常量
+_SCHEDULE_PRIORITY_KEYWORDS: Dict[str, str] = {
+    "高优": "high",
+    "高优先级": "high",
+    "高": "high",
+    "紧急": "high",
+    "重要": "high",
+    "中优": "medium",
+    "中优先级": "medium",
+    "中": "medium",
+    "低优": "low",
+    "低优先级": "low",
+    "低": "low",
+}
+
+_SCHEDULE_REPEATS = ["每天", "每日", "每周", "每月", "每年"]
+
+
+def _parse_schedule_date(text: str, now: datetime) -> datetime:
+    m = re.search(r"(今天|明天|昨天|后天|\d{4}-\d{2}-\d{2}|\d{1,2}月\d{1,2}日)", text)
+    base = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    if not m:
+        return base
+    token = m.group(1)
+    if token == "今天":
+        return base
+    if token == "明天":
+        return base + timedelta(days=1)
+    if token == "昨天":
+        return base - timedelta(days=1)
+    if token == "后天":
+        return base + timedelta(days=2)
+    if re.match(r"^\d{4}-\d{2}-\d{2}$", token):
+        try:
+            dt = datetime.strptime(token, "%Y-%m-%d")
+            return dt.replace(hour=0, minute=0, second=0, microsecond=0)
+        except ValueError:
+            return base
+    m2 = re.match(r"^(\d{1,2})月(\d{1,2})日$", token)
+    if m2:
+        try:
+            month = int(m2.group(1))
+            day = int(m2.group(2))
+            return datetime(now.year, month, day)
+        except ValueError:
+            return base
+    return base
+
+
+def _parse_schedule_time(text: str, base_date: datetime) -> Tuple[datetime, bool]:
+    """解析时间，返回 (datetime, has_time)"""
+    # 匹配 (\d{1,2}[:点]\d{0,2}) 兼容冒号与中文点
+    m = re.search(r"(\d{1,2})\s*[:：点]\s*(\d{1,2})?", text)
+    has_time = False
+    hour = 0
+    minute = 0
+    if m:
+        has_time = True
+        try:
+            hour = int(m.group(1))
+        except ValueError:
+            hour = 0
+        if m.group(2):
+            try:
+                minute = int(m.group(2))
+            except ValueError:
+                minute = 0
+        else:
+            minute = 0
+        # 下午/晚上 换算：12 小时制转 24
+        if any(kw in text for kw in ["下午", "晚上", "傍晚", "夜间"]):
+            if 1 <= hour <= 11:
+                hour += 12
+        # 上午/凌晨不加
+        hour = max(0, min(23, hour))
+        minute = max(0, min(59, minute))
+    return base_date.replace(hour=hour, minute=minute, second=0, microsecond=0), has_time
+
+
+def _detect_schedule_priority(text: str) -> str:
+    # 按关键词长度降序匹配，避免 "高" 误抢 "高优"
+    for kw in sorted(_SCHEDULE_PRIORITY_KEYWORDS.keys(), key=len, reverse=True):
+        if kw in text:
+            return _SCHEDULE_PRIORITY_KEYWORDS[kw]
+    return "none"
+
+
+def _detect_schedule_location(text: str) -> str:
+    # 优先 "在...开" 结构
+    m = re.search(r"在\s*(.+?)\s*开", text)
+    if m:
+        loc = m.group(1).strip()
+        # 去除尾部标点
+        loc = loc.strip(" ，,。")
+        if loc:
+            return loc
+    # 兜底：在 后取非空片段直到空白或标点
+    m2 = re.search(r"在\s*([^\s，。,]+)", text)
+    if m2:
+        loc = m2.group(1).strip()
+        # 若捕获中仍含 "开" 与后续，截断
+        if "开" in loc:
+            loc = loc.split("开")[0]
+        return loc.strip(" ，,。")
+    return ""
+
+
+def _detect_schedule_repeat(text: str) -> str:
+    for rep in _SCHEDULE_REPEATS:
+        if rep in text:
+            # 统一返回 "每周" 等短形式
+            if rep == "每日":
+                return "每天"
+            return rep
+    if "不重复" in text:
+        return ""
+    # 兼容 "每周重复" 等
+    m = re.search(r"(每天|每周|每月|每年)", text)
+    if m:
+        return m.group(1)
+    return ""
+
+
+def _detect_remind_before(text: str) -> int:
+    m = re.search(r"提前\s*(\d+)\s*分钟", text)
+    if m:
+        try:
+            return int(m.group(1))
+        except ValueError:
+            pass
+    m2 = re.search(r"提前\s*(\d+)\s*分", text)
+    if m2:
+        try:
+            return int(m2.group(1))
+        except ValueError:
+            pass
+    return 10
+
+
+def parse_schedule(text: str, now=None) -> Tuple[Optional[Dict], str]:
+    """解析日程自然语言。返回 (data, err)。
+
+    data 包含：title, date(datetime), priority, location, repeat, remind_before(int), allDay(bool)
+    """
+    now = now or datetime.now()
+    raw = (text or "").strip()
+    if not raw:
+        return None, "内容为空"
+
+    base_date = _parse_schedule_date(raw, now)
+    dt, has_time = _parse_schedule_time(raw, base_date)
+    # 若未解析到时间且文本中无时间关键词，则视为全天事件
+    all_day = not has_time
+
+    priority = _detect_schedule_priority(raw)
+    location = _detect_schedule_location(raw)
+    repeat = _detect_schedule_repeat(raw)
+    remind_before = _detect_remind_before(raw)
+
+    # 标题提取：去除已识别片段
+    cleaned = raw
+    # 去除日期
+    cleaned = re.sub(r"(今天|明天|昨天|后天|\d{4}-\d{2}-\d{2}|\d{1,2}月\d{1,2}日)", "", cleaned)
+    # 去除时间段关键词下午等 + 时间本身
+    cleaned = re.sub(r"(上午|下午|晚上|傍晚|凌晨|夜间)", "", cleaned)
+    cleaned = re.sub(r"(\d{1,2})\s*[:：点]\s*(\d{1,2})?", "", cleaned)
+    # 去除优先级词（按长度降序）
+    for kw in sorted(_SCHEDULE_PRIORITY_KEYWORDS.keys(), key=len, reverse=True):
+        cleaned = cleaned.replace(kw, "")
+    # 去除地点片段
+    if location:
+        # 同时去除 "在"+location
+        cleaned = cleaned.replace("在" + location, "")
+        cleaned = cleaned.replace(location, "")
+    else:
+        # 无明确地点时仍尝试去除 "在..." 兜底
+        cleaned = re.sub(r"在\s*[^\s，。,]+", "", cleaned)
+    # 去除重复词
+    for rep in _SCHEDULE_REPEATS + ["重复", "不重复"]:
+        cleaned = cleaned.replace(rep, "")
+    # 去除提醒词
+    cleaned = re.sub(r"提前\s*\d+\s*分钟", "", cleaned)
+    cleaned = re.sub(r"提前\s*\d+\s*分", "", cleaned)
+    # 去除剩余动词与空白
+    cleaned = cleaned.replace("开", "")
+    cleaned = re.sub(r"\s+", " ", cleaned).strip(" ，,。")
+    cleaned = cleaned.strip()
+    if not cleaned:
+        cleaned = "日程"
+    title = cleaned[:30].strip()
+    # 若标题过长含多词，取最后一段（通常为事件名）
+    # 例如 "周会" 已经精简
+    data: Dict[str, Any] = {
+        "title": title,
+        "date": dt,
+        "priority": priority,
+        "location": location,
+        "repeat": repeat,
+        "remind_before": remind_before,
+        "allDay": all_day,
+    }
+    return data, ""
+
+
+def build_bill_md(data: Dict, now=None) -> str:
+    """生成账单 markdown（含 YAML frontmatter）"""
+    now = now or datetime.now()
+    title = str(data.get("title") or data.get("description") or "账单").strip() or "账单"
+    amount = data.get("amount", 0)
+    type_ = data.get("type", "expense")
+    if type_ not in ("income", "expense", "transfer"):
+        type_ = "expense"
+    category = str(data.get("category") or "其他").strip() or "其他"
+    account = str(data.get("account") or "其他").strip() or "其他"
+    date_val = data.get("date") or now
+    if isinstance(date_val, datetime):
+        date_str = date_val.strftime("%Y-%m-%d")
+    else:
+        date_str = str(date_val).strip() or now.strftime("%Y-%m-%d")
+    description = str(data.get("description") or title).strip()
+    tags = data.get("tags")
+    if tags is None:
+        tags = [category] if category else []
+    # 确保 tags 为列表
+    if isinstance(tags, str):
+        tags = [tags]
+    fm: Dict[str, Any] = {
+        "title": title,
+        "amount": amount,
+        "type": type_,
+        "category": category,
+        "account": account,
+        "date": date_str,
+        "description": description,
+        "tags": list(tags),
+    }
+    body = str(data.get("body") or description or title).strip()
+    return _dump_yaml(fm) + "\n\n" + body + "\n"
+
+
+def build_schedule_md(data: Dict, now=None) -> str:
+    """生成日程 markdown（含 YAML frontmatter）"""
+    now = now or datetime.now()
+    title = str(data.get("title") or "日程").strip() or "日程"
+    date_val = data.get("date") or now
+    if isinstance(date_val, datetime):
+        all_day = data.get("allDay")
+        if all_day is None:
+            # 若时间部分为 00:00:00 则视为全天
+            all_day = date_val.hour == 0 and date_val.minute == 0 and date_val.second == 0
+        if all_day:
+            date_str = date_val.strftime("%Y-%m-%d")
+        else:
+            date_str = date_val.strftime("%Y-%m-%d %H:%M:%S")
+    else:
+        date_str = str(date_val).strip() or now.strftime("%Y-%m-%d")
+        all_day = bool(data.get("allDay", False))
+    priority = str(data.get("priority") or "none").strip()
+    if priority not in SCHEDULE_PRIORITIES:
+        # 兼容中文优先级误传入
+        priority = _SCHEDULE_PRIORITY_KEYWORDS.get(priority, "none")
+        if priority not in SCHEDULE_PRIORITIES:
+            priority = "none"
+    status = str(data.get("status") or "todo").strip()
+    if status not in ("todo", "done", "cancelled"):
+        status = "todo"
+    location = str(data.get("location") or "").strip()
+    repeat = str(data.get("repeat") or "").strip()
+    category = str(data.get("category") or "schedule").strip() or "schedule"
+    if category not in ("schedule", "birthday", "anniversary", "holiday"):
+        category = "schedule"
+    fm: Dict[str, Any] = {
+        "title": title,
+        "date": date_str,
+        "allDay": bool(all_day),
+        "priority": priority,
+        "status": status,
+        "location": location,
+        "repeat": repeat,
+        "category": category,
+    }
+    # 可选 endDate
+    if data.get("endDate"):
+        end_val = data.get("endDate")
+        if isinstance(end_val, datetime):
+            # 与 date 保持同格式
+            if all_day:
+                fm["endDate"] = end_val.strftime("%Y-%m-%d")
+            else:
+                fm["endDate"] = end_val.strftime("%Y-%m-%d %H:%M:%S")
+        else:
+            fm["endDate"] = str(end_val)
+    body = str(data.get("description") or data.get("body") or title).strip()
+    return _dump_yaml(fm) + "\n\n" + body + "\n"
