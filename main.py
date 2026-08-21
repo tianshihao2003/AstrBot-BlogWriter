@@ -164,13 +164,14 @@ BILL_PROMPT = (
     "只输出 JSON 对象。"
 )
 SCHEDULE_PROMPT = (
-    "你是日程信息抽取助手，只输出 JSON，不要解释。\n"
+    "你是日程信息抽取助手，只输出 JSON，不要解释。时区为 Asia/Shanghai。\n"
     "字段：title(标题), date(YYYY-MM-DD HH:MM:SS 或 YYYY-MM-DD), allDay(bool), priority(none/low/medium/high), location(地点), repeat(每天/每周/每月/每年或空), remind_before(整数分钟)\n"
     "优先级白名单: none、low、medium、high（高优=high，中优=medium，低优=low）\n"
-    "时间基准：{now}\n"
+    "时间基准：{now}（当前时间，请以此为基准精确计算相对时间，不要加减12小时）\n"
+    "相对时间规则：'X分钟后' = 基准+ X分钟，'半小时后'=基准+30分钟，'X小时后'=基准+X小时，保持日期与基准同一天除非跨天\n"
     "示例输入：明天下午3点高优在会议室A开周会 每周重复 提前15分钟\n"
     '示例输出：{"title":"周会","date":"2026-08-22 15:00:00","allDay":false,"priority":"high","location":"会议室A","repeat":"每周","remind_before":15}\n'
-    "示例输入：2分钟后在会议室A开周会 高优 提前1分钟\n"
+    "示例输入：2分钟后在会议室A开周会 高优 提前1分钟（若基准是 {now}，2分钟后就是 {now_plus_2m}）\n"
     '示例输出：{"title":"周会","date":"{now_plus_2m}","allDay":false,"priority":"high","location":"会议室A","repeat":"","remind_before":1}\n'
     "示例输入：明天上午9点开会\n"
     '示例输出：{"title":"开会","date":"2026-08-22 09:00:00","allDay":false,"priority":"none","location":"","repeat":"","remind_before":10}\n'
@@ -562,16 +563,30 @@ class BlogWriter(Star):
                     all_day = True
             if all_day is None:
                 all_day = dt.hour == 0 and dt.minute == 0 and dt.second == 0
-            # 相对时间兜底：若原文本含“分钟后”等但 dt 仍为 00:00，说明 LLM 未正确解析，用正则重算
+            # 相对时间强制覆盖：原文含“X分钟后”等时，LLM 常有时区/12小时偏差，直接用本地正则结果覆盖
+            if original_text and re.search(r"(\d+\s*(?:分钟|分|小时|时|秒)\s*后|半小时后|半个小时后)", original_text):
+                try:
+                    from blog_writer_core import _parse_schedule_date as _psd2, _parse_schedule_time as _pst2
+
+                    base2 = _psd2(original_text, now)
+                    dt2, has_time2 = _pst2(original_text, base2, now)
+                    if has_time2:
+                        # 只有当正则算出的时间与 AI 相差超过 2 分钟时才覆盖，避免误覆盖
+                        if abs((dt2 - dt).total_seconds()) > 120 or (dt.hour == 0 and dt.minute == 0):
+                            dt = dt2
+                            all_day = False
+                except Exception:
+                    pass
+            # 旧兜底保留：若仍为 00:00 且原文含相对时间，再算一次
             if original_text and re.search(r"(\d+\s*(?:分钟|分|小时|时|秒)\s*后|半小时后|半个小时后)", original_text):
                 if dt.hour == 0 and dt.minute == 0 and dt.second == 0:
                     try:
-                        from blog_writer_core import _parse_schedule_date as _psd2, _parse_schedule_time as _pst2
+                        from blog_writer_core import _parse_schedule_date as _psd3, _parse_schedule_time as _pst3
 
-                        base2 = _psd2(original_text, now)
-                        dt2, has_time2 = _pst2(original_text, base2, now)
-                        if has_time2:
-                            dt = dt2
+                        base3 = _psd3(original_text, now)
+                        dt3, has_time3 = _pst3(original_text, base3, now)
+                        if has_time3:
+                            dt = dt3
                             all_day = False
                     except Exception:
                         pass
