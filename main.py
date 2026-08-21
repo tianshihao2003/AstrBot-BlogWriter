@@ -294,39 +294,59 @@ class BlogWriter(Star):
             sent = False
             # 1. 优先用 origin 直接发纯文本（最通用，兼容所有版本）
             if origin and hasattr(self.context, "send_message"):
-                for attempt in [
-                    lambda: self.context.send_message(origin, title),  # type: ignore
-                    lambda: self.context.send_message(origin, Plain(title)),  # type: ignore
-                    lambda: self.context.send_message(origin, [Plain(title)]),  # type: ignore
-                ]:
+                # 解析 origin 中的平台名，用于兜底
+                plat_name = origin.split(":")[0] if ":" in origin else ""
+                for idx, attempt in enumerate(
+                    [
+                        lambda: self.context.send_message(origin, title),  # type: ignore
+                        lambda: self.context.send_message(origin, Plain(title)),  # type: ignore
+                        lambda: self.context.send_message(origin, [Plain(title)]),  # type: ignore
+                    ]
+                ):
                     try:
                         await attempt()  # type: ignore
                         sent = True
-                        logger.info("BlogWriter: 主动推送 via origin 成功 origin=%s", origin)
+                        logger.info("BlogWriter: 主动推送 via origin 成功 origin=%s attempt=%s", origin, idx)
                         break
                     except Exception as e:
-                        logger.debug("BlogWriter: 主动推送尝试失败: %s", e)
+                        logger.warning("BlogWriter: 主动推送 via origin 失败 attempt=%s err=%s", idx, e)
                         continue
                 if not sent:
                     logger.warning("BlogWriter: 主动推送 via origin 失败: all attempts failed origin=%s", origin)
-            # 2. 兜底：尝试 weixin_oc 平台直接发
+            # 2. 兜底：按 origin 解析平台名再试
             if not sent and hasattr(self.context, "get_platform"):
-                try:
-                    plat = self.context.get_platform("weixin_oc")
-                    if plat and hasattr(plat, "send_message"):
-                        for attempt in [
-                            lambda: plat.send_message(Plain(title), user_id),  # type: ignore
-                            lambda: plat.send_message(title, user_id),  # type: ignore
-                            lambda: plat.send_message([Plain(title)], user_id),  # type: ignore
-                        ]:
-                            try:
-                                await attempt()  # type: ignore
-                                sent = True
-                                break
-                            except Exception:
-                                continue
-                except Exception as e:
-                    logger.warning("BlogWriter: 平台推送失败: %s", e)
+                plat_names = []
+                if origin and ":" in origin:
+                    plat_names.append(origin.split(":")[0])
+                plat_names.extend(["weixin_oc", "weixin_personal_bglh", "weixin"])
+                seen = set()
+                for pname in plat_names:
+                    if not pname or pname in seen:
+                        continue
+                    seen.add(pname)
+                    try:
+                        plat = self.context.get_platform(pname)
+                        if plat and hasattr(plat, "send_message"):
+                            for idx, attempt in enumerate(
+                                [
+                                    lambda p=plat: p.send_message(Plain(title), user_id),  # type: ignore
+                                    lambda p=plat: p.send_message(title, user_id),  # type: ignore
+                                    lambda p=plat: p.send_message([Plain(title)], user_id),  # type: ignore
+                                    lambda p=plat: p.send_message(user_id, Plain(title)),  # type: ignore
+                                ]
+                            ):
+                                try:
+                                    await attempt()  # type: ignore
+                                    sent = True
+                                    logger.info("BlogWriter: 平台推送成功 via %s attempt=%s", pname, idx)
+                                    break
+                                except Exception as e:
+                                    logger.warning("BlogWriter: 平台 %s 尝试 %s 失败: %s", pname, idx, e)
+                                    continue
+                        if sent:
+                            break
+                    except Exception as e:
+                        logger.warning("BlogWriter: 平台 %s 获取失败: %s", pname, e)
             if not sent:
                 logger.warning("BlogWriter: 未能主动推送，提醒仅记录日志 user=%s title=%s", user_id, title)
         except Exception as e:
