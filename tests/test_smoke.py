@@ -656,7 +656,7 @@ class TestBillScheduleAI(unittest.TestCase):
             async def _album_index(self, repo, branch, token):
                 return self.album_index_result
 
-            def _schedule_remind(self, user_id, title, remind_at):
+            def _schedule_remind(self, user_id, title, remind_at, *args, **kwargs):
                 self.scheduled.append((user_id, title, remind_at))
 
             async def terminate(self):
