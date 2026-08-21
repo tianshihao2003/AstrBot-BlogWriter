@@ -292,19 +292,46 @@ class BlogWriter(Star):
         try:
             logger.info("BlogWriter: 到点提醒 user=%s title=%s origin=%s", user_id, title, origin)
             sent = False
-            # 1. 优先用 origin 直接发纯文本（最通用，兼容所有版本）
+            # 1. 优先用 origin + MessageChain（按 AstrBot 标准构造）
             if origin and hasattr(self.context, "send_message"):
-                # 解析 origin 中的平台名，用于兜底
-                plat_name = origin.split(":")[0] if ":" in origin else ""
-                for idx, attempt in enumerate(
+                # 尝试构造 MessageChain，兼容不同版本的导入路径
+                def _make_chain(text: str):
+                    try:
+                        from astrbot.core.message.message import MessageChain as _MC1  # type: ignore
+
+                        try:
+                            return _MC1(chain=[Plain(text)])  # type: ignore
+                        except Exception:
+                            try:
+                                mc = _MC1()  # type: ignore
+                                mc.chain = [Plain(text)]  # type: ignore
+                                return mc
+                            except Exception:
+                                return _MC1([Plain(text)])  # type: ignore
+                    except ImportError:
+                        try:
+                            from astrbot.core.message.components import MessageChain as _MC2  # type: ignore
+
+                            try:
+                                return _MC2(chain=[Plain(text)])  # type: ignore
+                            except Exception:
+                                return _MC2([Plain(text)])  # type: ignore
+                        except ImportError:
+                            return [Plain(text)]  # type: ignore
+                    except Exception:
+                        return [Plain(text)]  # type: ignore
+
+                for idx, maker in enumerate(
                     [
-                        lambda: self.context.send_message(origin, title),  # type: ignore
-                        lambda: self.context.send_message(origin, Plain(title)),  # type: ignore
-                        lambda: self.context.send_message(origin, [Plain(title)]),  # type: ignore
+                        lambda: _make_chain(title),
+                        lambda: [Plain(title)],  # type: ignore
+                        lambda: Plain(title),  # type: ignore
+                        lambda: title,  # type: ignore
                     ]
                 ):
                     try:
-                        await attempt()  # type: ignore
+                        chain = maker()  # type: ignore
+                        await self.context.send_message(origin, chain)  # type: ignore
                         sent = True
                         logger.info("BlogWriter: 主动推送 via origin 成功 origin=%s attempt=%s", origin, idx)
                         break
@@ -313,12 +340,36 @@ class BlogWriter(Star):
                         continue
                 if not sent:
                     logger.warning("BlogWriter: 主动推送 via origin 失败: all attempts failed origin=%s", origin)
-            # 2. 兜底：按 origin 解析平台名再试
+            # 2. 兜底：按 origin 解析平台名再试（兼容 weixin_oc / weixin_personal_bglh）
             if not sent and hasattr(self.context, "get_platform"):
                 plat_names = []
                 if origin and ":" in origin:
                     plat_names.append(origin.split(":")[0])
                 plat_names.extend(["weixin_oc", "weixin_personal_bglh", "weixin"])
+
+                def _plat_chain(text: str):
+                    try:
+                        from astrbot.core.message.message import MessageChain as _PMC1  # type: ignore
+
+                        try:
+                            return _PMC1(chain=[Plain(text)])  # type: ignore
+                        except Exception:
+                            try:
+                                _mc = _PMC1()  # type: ignore
+                                _mc.chain = [Plain(text)]  # type: ignore
+                                return _mc
+                            except Exception:
+                                return _PMC1([Plain(text)])  # type: ignore
+                    except ImportError:
+                        try:
+                            from astrbot.core.message.components import MessageChain as _PMC2  # type: ignore
+
+                            return _PMC2([Plain(text)])  # type: ignore
+                        except ImportError:
+                            return [Plain(text)]  # type: ignore
+                    except Exception:
+                        return [Plain(text)]  # type: ignore
+
                 seen = set()
                 for pname in plat_names:
                     if not pname or pname in seen:
@@ -329,10 +380,11 @@ class BlogWriter(Star):
                         if plat and hasattr(plat, "send_message"):
                             for idx, attempt in enumerate(
                                 [
+                                    lambda p=plat: p.send_message(_plat_chain(title), user_id),  # type: ignore
                                     lambda p=plat: p.send_message(Plain(title), user_id),  # type: ignore
                                     lambda p=plat: p.send_message(title, user_id),  # type: ignore
                                     lambda p=plat: p.send_message([Plain(title)], user_id),  # type: ignore
-                                    lambda p=plat: p.send_message(user_id, Plain(title)),  # type: ignore
+                                    lambda p=plat: p.send_message(user_id, _plat_chain(title)),  # type: ignore
                                 ]
                             ):
                                 try:
