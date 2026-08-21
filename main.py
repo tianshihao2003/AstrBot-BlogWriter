@@ -1280,7 +1280,7 @@ class BlogWriter(Star):
             if cmd == "提醒":
                 yield self._handle_remind(event, user_id, args)
                 return
-            if cmd == "模型":
+            if cmd in ("模型", "模型列表"):
                 yield await self._handle_models(event)
                 return
             if cmd == "发布":
