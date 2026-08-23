@@ -1,6 +1,8 @@
 # AGENTS.md
 
-AstrBot BlogWriter 插件：通过微信（weixin_oc）对话把内容发布到静态博客仓库 `tianshihao2003/dumplingandcakeblog`（Firefly Astro）。内容类型：动态（moments）、笔记（notebooks）、足迹（places）、友链（friends）、相册（album）、账单（bills）、日程（schedules，支持 AI 自然语言 + 微信提醒）。流程：图片上传 CloudFlare-ImgBed → 生成 markdown（对齐博客 zod schema）→ GitHub API 提交 main 分支 → Actions 构建 + EdgeOne Pages 部署。
+AstrBot BlogWriter 插件：通过微信（weixin_oc）对话把内容发布到静态博客仓库 `tianshihao2003/dumplingandcakeblog`（Firefly Astro）。内容类型：动态（moments）、笔记（notebooks）、足迹（places）、友链（friends）、相册（album）、账单（bills）、日程（schedules，自然语言正则 + 微信提醒）。流程：图片上传 CloudFlare-ImgBed → 生成 markdown（对齐博客 zod schema）→ GitHub API 提交 main 分支 → Actions 构建 + EdgeOne Pages 部署。
+
+**2026-08-23 重大变更**：移除全部 AI 自然语言抽取（LLM 调用、`/模型列表` 命令、免命令自然语言识别、`ai_*` 配置项全删），账单/日程只走本地正则；所有内容必须显式用命令创建。同日对齐博客最新文件格式（见「业务规则」各条）。
 
 先读文档：`DESIGN.md`（已批准的完整设计，含协议与规则）、`README.md`（安装/配置/使用）。
 
@@ -96,8 +98,10 @@ EOF
 - 图床上传目录：动态/笔记/足迹照片统一用 `imgbed_upload_folder`（默认 `blog/moments`，与博客惯例一致）；友链无图片。
 - 相册：`/相册 相册名` 会话只收图片；**存在性按 title/文件名判断**（列出 `src/content/album/` 解析每个文件的 title/imgbedFolder，博客文件名与 title 不一定相同，如 `xiangce1.md` 的 title 是「测试相册」）；命中则只传图不写文件、照片上传到**命中相册自己的 imgbedFolder**（不触发构建，博客详情页运行时从图床动态拉图）；未命中才创建仅含 `title`/`date`/`imgbedFolder` 的 md，不生成 `-1` 后缀。
 - 动态媒体：GIF 走 Image 组件（`.gif` 已在白名单）；视频走 `Video` 组件（微信适配器下载到本地 `.mp4`），**仅动态会话接收**（`_extract_images(allow_video=...)`，笔记/足迹/相册/账单/日程仍只收图片，账单/日程为文本会话），URL 与图片一样进 `images` 数组；大小上限视频 100MB/图片 20MB；微信 raw_message type 5（video_item）兜底 ref 带 `.mp4` 后缀。
-- **账单**：`/账单` 支持自然语言（`今天午餐微信花了32`/`发工资12000`）→ AI 主抽取 `amount/type/category/account/date/description`，失败走正则兜底；金额必抓（`块/元/￥`），分类/账户白名单优先匹配未命中则新建；路径 `src/content/bills/YYYY-MM-DD-{slug}.md`（`slug=clean_filename_part(title or category)`），冲突 `-1..-10`；`amount` 正收入负支出，`type` 自动 `income/expense`
-- **日程**：`/日程` 支持自然语言（`明天下午3点高优在会议室A开周会 每周重复 提前15分钟`）→ AI 主抽取 `title/date/allDay/priority/location/repeat/remind_before`，失败走正则；时间基准 `now`，`allDay` 无时间则真，`priority` 映射 `高→high` 等，`repeat` 命中 `每天/每周/每月/每年`，`remind_before` 抽“提前N分钟”否则取配置 `schedule_remind_before`（默认 10，0 为准点）；路径 `src/content/schedules/YYYY-MM-DD-{slug}.md`；**提醒**：含时间且非全天的日程，`remind_at = date - remind_before`，`apscheduler` 持久化到 `data/schedules_reminder.json`，重启通过 `_restore_reminders` 恢复，到点 `weixin_oc` 私聊 `🔔 日程提醒`，支持 `/提醒 列表/取消`
+- **账单**：`/账单` 支持自然语言**正则**解析（2026-08-23 起无 AI）：`今天午餐微信花了32`/`发工资12000` → `amount/type/category/account/date/description`；金额必抓（`块/元/￥`），分类/账户白名单优先匹配未命中则新建；`午餐30晚餐45打车12` 一句多笔走 `parse_bills_batch` 批量会话；路径 `src/content/bills/YYYY-MM-DD-{slug}.md`（`slug=clean_filename_part(title or category)`），冲突 `-1..-10`；`amount` 正收入负支出，`type` 自动 `income/expense`
+- **日程**：`/日程` 支持自然语言**正则**解析（2026-08-23 起无 AI）：`明天下午3点高优在会议室A开周会 每周重复 提前15分钟` → `title/date/allDay/priority/location/repeat/remind_before`；时间基准 `now`，`allDay` 无时间则真，`priority` 映射 `高→high` 等，`repeat` 命中 `每天/每周/每月/每年`，`remind_before` 抽“提前N分钟”否则取配置 `schedule_remind_before`（默认 10，0 为准点）；**批量生日** `parse_schedules_batch` 全文扫描日期+人物映射（结束位置最靠右者优先，防“二姐”被子串“姐”抢、防上一个人的词干扰），农历生日产 `isLunar/lunarMonth/lunarDay`（不存公历 date，公历换算由博客端 lunar-javascript 完成），文件名 `lunar-M-D-{slug}.md`（`schedule_filename()`），公历生日过今年顺延明年；**提醒**：含时间且非全天的日程，`remind_at = date - remind_before`，`apscheduler` 持久化到 `data/schedules_reminder.json`，重启通过 `_restore_reminders` 恢复，到点 `weixin_oc` 私聊 `🔔 日程提醒`，支持 `/提醒 列表/取消`；全天生日不调度提醒
+- **格式对齐（2026-08-23，改 md 生成时必须保持）**：bills/schedules/places 用博客最新风格——字符串一律双引号（date/datetime 形态除外）、tags 行内数组 `["a"]`、photos 多行带引号；places 新增 `description: "记录在{省}{市}的足迹。"`、不写 `visitCount`；schedules 空 `location/repeat/person` 不写字段、支持 `person/isLunar/lunarMonth/lunarDay`；friends 保持无引号风格但 `weight: 0` + 末尾 `group: other`；album 加 `subtitle: 记录{标题}`、`imgbedFolder` 带引号；moments/notebooks 维持原样（published/date 无引号 + tags 多行）
+- **Python 3.8 兼容**：本地测试环境为 Python 3.8.6，函数注解禁止用 `str | None`（3.10+ 语法，import 即崩），一律 `Optional[str]`
 - 所有失败路径返回明确中文错误信息并写日志。
 
 ## 环境

@@ -21,7 +21,7 @@ def now_shanghai() -> datetime:
 SESSION_TIMEOUT = timedelta(minutes=30)
 MAX_PATH_SUFFIX = 10
 
-COMMANDS = ("动态", "笔记", "足迹", "友链", "相册", "账单", "日程", "提醒", "模型", "模型列表", "发布", "取消", "状态", "帮助")
+COMMANDS = ("动态", "笔记", "足迹", "友链", "相册", "账单", "日程", "提醒", "发布", "取消", "状态", "帮助")
 
 BILL_CATEGORIES = ["餐饮", "交通", "住房", "工资", "居家生活", "交流通讯", "食品酒水", "职业收入", "人情收礼", "其他"]
 BILL_ACCOUNTS = ["微信", "支付宝", "银行卡", "现金", "其他"]
@@ -153,25 +153,56 @@ def with_suffix(name: str, ext: str, index: int) -> str:
 
 # ---------- markdown 生成 ----------
 
-def _dump_yaml(data: Dict[str, Any]) -> str:
-    """生成 YAML frontmatter（仅支持本项目用到的简单类型）。"""
+def _dump_yaml(
+    data: Dict[str, Any],
+    quote_all: bool = False,
+    quote_keys: Optional[set] = None,
+    inline_keys: Optional[set] = None,
+) -> str:
+    """生成 YAML frontmatter（仅支持本项目用到的简单类型）。
+
+    - quote_all=True：所有字符串值强制双引号（date/datetime 形态除外），
+      对齐博客 bills/schedules/places 最新文件风格（PagesCMS 生成格式）。
+    - quote_keys：仅指定 key 强制双引号（quote_all 的按 key 版本）。
+    - inline_keys：指定 key 的非空列表输出行内数组（如 tags: ["a", "b"]）。
+    """
+    quote_keys = quote_keys or set()
+    inline_keys = inline_keys or set()
+
+    def _quoted(value: str) -> str:
+        escaped = value.replace("\\", "\\\\").replace('"', '\\"')
+        return '"{}"'.format(escaped)
+
+    def _need_quote(key: str) -> bool:
+        return quote_all or key in quote_keys
+
     lines = ["---"]
     for key, value in data.items():
         if isinstance(value, list):
             if not value:
                 lines.append("{}: []".format(key))
+            elif key in inline_keys:
+                items = []
+                for item in value:
+                    s = str(item)
+                    items.append(_quoted(s) if _need_quote(key) else _yaml_str(s))
+                lines.append("{}: [{}]".format(key, ", ".join(items)))
             else:
                 lines.append("{}:".format(key))
                 for item in value:
-                    lines.append("  - {}".format(_yaml_str(str(item))))
+                    s = str(item)
+                    rendered = _quoted(s) if _need_quote(key) else _yaml_str(s)
+                    lines.append("  - {}".format(rendered))
         elif isinstance(value, bool):
             lines.append("{}: {}".format(key, "true" if value else "false"))
         elif isinstance(value, (int, float)):
             lines.append("{}: {}".format(key, value))
         elif isinstance(value, str):
             if _is_datetime_str(value):
-                # 对齐现有数据：published 等时间字段不加引号（如 2024-10-02 14:19:00）
+                # date/datetime 形态一律不加引号（对齐现有数据：2024-10-02 14:19:00 / 2026-08-23）
                 lines.append("{}: {}".format(key, value))
+            elif _need_quote(key):
+                lines.append("{}: {}".format(key, _quoted(value)))
             else:
                 lines.append("{}: {}".format(key, _yaml_str(value)))
         else:
@@ -246,34 +277,40 @@ def build_place_md(
     tags: List[str],
     day: datetime = None,
 ) -> str:
+    """对齐博客最新足迹格式（2026-08-22 参照 src/content/life/places/）：
+    新增 description 固定句式、不再写 visitCount（schema 默认 1）、
+    字符串带引号、tags 行内数组、photos 多行带引号。
+    """
     day = day or now_shanghai()
-    fm = {
-        "date": day.strftime("%Y-%m-%d"),
+    fm: Dict[str, Any] = {
+        "description": "记录在{}{}的足迹。".format(province, city),
         "province": province,
         "city": city,
     }
     if experience:
         fm["experience"] = experience
-    fm["visitCount"] = 1
+    fm["date"] = day.strftime("%Y-%m-%d")
     fm["lat"] = round(lat, 6)
     fm["lng"] = round(lng, 6)
-    fm["photos"] = list(photos)
     fm["tags"] = tags
-    return _dump_yaml(fm) + "\n\n\n"
+    if photos:
+        fm["photos"] = list(photos)
+    return _dump_yaml(fm, quote_all=True, inline_keys={"tags"}) + "\n\n\n"
 
 
 def build_album_md(title: str, folder: str, day: datetime = None) -> str:
-    """对齐现有相册格式（2026-08-13 图床化惯例）：只有 title/date/imgbedFolder 三个字段。
-
-    imgbedFolder 指向图床目录，博客详情页运行时动态拉图，故照片不进 md。
+    """对齐现有相册格式（2026-08-13 图床化惯例 + subtitle）：
+    title/subtitle/date + imgbedFolder（带引号，对齐现有文件如 2026-spring.md）。
+    照片不进 md：博客详情页运行时从图床目录动态拉图。
     """
     day = day or now_shanghai()
     fm = {
         "title": title,
+        "subtitle": "记录{}".format(title),
         "date": day.strftime("%Y-%m-%d"),
         "imgbedFolder": folder,
     }
-    return _dump_yaml(fm) + "\n\n\n"
+    return _dump_yaml(fm, quote_keys={"imgbedFolder"}) + "\n\n\n"
 
 
 def _image_alt(url: str) -> str:
@@ -559,9 +596,14 @@ def build_friend_md(
     siteurl: str,
     imgurl: str,
     tags: List[str],
-    weight: int = 10,
+    weight: int = 0,
     enabled: bool = True,
+    added: Optional[str] = None,
 ) -> str:
+    """对齐现有友链文件格式：weight 0、末尾 group 字段（schema enum friend/other，默认 other）。
+    字符串不加引号（对齐现有 friends 文件风格）。"""
+    if added is None:
+        added = now_shanghai().strftime("%Y-%m-%d")
     fm = {
         "title": title,
         "imgurl": imgurl,
@@ -570,6 +612,8 @@ def build_friend_md(
         "tags": tags,
         "weight": weight,
         "enabled": enabled,
+        "added": added,
+        "group": "other",
     }
     return _dump_yaml(fm) + "\n\n\n"
 
@@ -1114,7 +1158,11 @@ def parse_schedule(text: str, now=None) -> Tuple[Optional[Dict], str]:
 
 
 def parse_schedules_batch(text: str, now=None) -> Tuple[List[Dict], str]:
-    """批量解析多条生日/日程（用于一句含多个“生日是农历X月X日”的情况）。直接扫描全文所有日期。"""
+    """批量解析多条生日/日程（用于一句含多个“生日是农历X月X日”的情况）。直接扫描全文所有日期。
+
+    对齐博客 schedules 新 schema（2026-08）：农历生日写 isLunar/lunarMonth/lunarDay
+    （不存公历近似 date），公历生日存 date；农历转公历由博客端 lunar-javascript 完成。
+    """
     now = now or now_shanghai()
     raw = (text or "").strip().replace("生气", "生日").replace("生如", "生日")
     if not raw:
@@ -1141,13 +1189,21 @@ def parse_schedules_batch(text: str, now=None) -> Tuple[List[Dict], str]:
     # 直接扫描全文所有日期，避免按逗号切分丢失“对象的是12.22”这类无“生日”关键词的条目
     for m_date in re.finditer(r"(\d{1,2})[.\-月](\d{1,2})日?", raw):
         date_start = m_date.start()
-        # 向前取30字符找人物
+        # 向前取 20 字符找人物：取结束位置最靠近日期的词（同结束位置取更长词，
+        # 避免“…12.14二姐4.4”里“姐”抢过“二姐”、“…8.24对象12.22”里“我”抢过“对象”）
         context = raw[max(0, date_start - 20) : date_start]
         person = ""
-        for key in sorted(person_map.keys(), key=len, reverse=True):
-            if key in context:
-                person = person_map[key]
-                break
+        best_end = -1
+        best_len = -1
+        for key, val in person_map.items():
+            pos = context.rfind(key)
+            if pos == -1:
+                continue
+            end = pos + len(key)
+            if end > best_end or (end == best_end and len(key) > best_len):
+                best_end = end
+                best_len = len(key)
+                person = val
         if not person:
             m_p = re.search(r"(\S{1,6})的是", context)
             if m_p:
@@ -1158,22 +1214,9 @@ def parse_schedules_batch(text: str, now=None) -> Tuple[List[Dict], str]:
         except ValueError:
             continue
         is_lunar = is_lunar_all or "农历" in raw[max(0, date_start - 10) : m_date.end() + 10] or "农历" in context
-        # 农历转公历：用当前年份的农历对应公历（简化：直接存公历的8.24，若 is_lunar 则备注）
-        # 真正转换需 lunar 库，此处先存公历的月日，标题注明农历
-        try:
-            # 若是农历，尝试用 lunar_python 转换，否则直接用公历
-            dt = datetime(now.year, month, day)
-            # 若已过今年，则用明年（生日按来年算）
-            if dt < now.replace(hour=0, minute=0, second=0, microsecond=0):
-                dt = datetime(now.year + 1, month, day)
-        except ValueError:
-            continue
-        title = f"{person}生日" if person else "生日"
-        if is_lunar:
-            title += "（农历）"
-        results.append({
+        title = "{}生日".format(person) if person else "生日"
+        item: Dict[str, Any] = {
             "title": title,
-            "date": dt,
             "priority": "none",
             "location": "",
             "repeat": "每年",
@@ -1181,20 +1224,48 @@ def parse_schedules_batch(text: str, now=None) -> Tuple[List[Dict], str]:
             "allDay": True,
             "category": "birthday",
             "person": person,
-            "is_lunar": is_lunar,
-        })
+            "isLunar": is_lunar,
+        }
+        if is_lunar:
+            item["lunarMonth"] = month
+            item["lunarDay"] = day
+        else:
+            # 公历生日：已过今年则用明年
+            try:
+                dt = datetime(now.year, month, day)
+                if dt < now.replace(hour=0, minute=0, second=0, microsecond=0):
+                    dt = datetime(now.year + 1, month, day)
+                item["date"] = dt
+            except ValueError:
+                continue
+        results.append(item)
     if not results:
         return [], "未识别到生日信息"
     return results, ""
 
 
+def schedule_filename(data: Dict, now: datetime = None) -> str:
+    """日程文件名的日期部分：农历 → lunar-M-D（对齐 lunar-8-24-我的生日.md）；
+    普通 → YYYY-MM-DD。"""
+    if data.get("isLunar") and data.get("lunarMonth") and data.get("lunarDay"):
+        return "lunar-{}-{}".format(data.get("lunarMonth"), data.get("lunarDay"))
+    date_val = data.get("date")
+    base = now or now_shanghai()
+    if isinstance(date_val, datetime):
+        return date_val.strftime("%Y-%m-%d")
+    if isinstance(date_val, str) and date_val.strip():
+        return date_val.strip()[:10]
+    return base.strftime("%Y-%m-%d")
+
+
 def build_bill_md(data: Dict, now=None) -> str:
-    """生成账单 markdown（含 YAML frontmatter）"""
+    """生成账单 markdown。对齐博客最新 bills 格式（2026-08-23 参照）：
+    字符串带双引号、date/amount 不带、tags 行内数组。"""
     now = now or now_shanghai()
     title = str(data.get("title") or data.get("description") or "账单").strip() or "账单"
     amount = data.get("amount", 0)
     type_ = data.get("type", "expense")
-    if type_ not in ("income", "expense", "transfer"):
+    if type_ not in ("income", "expense", "transfer", "liability"):
         type_ = "expense"
     category = str(data.get("category") or "其他").strip() or "其他"
     account = str(data.get("account") or "其他").strip() or "其他"
@@ -1221,26 +1292,19 @@ def build_bill_md(data: Dict, now=None) -> str:
         "tags": list(tags),
     }
     body = str(data.get("body") or description or title).strip()
-    return _dump_yaml(fm) + "\n\n" + body + "\n"
+    return _dump_yaml(fm, quote_all=True, inline_keys={"tags"}) + "\n\n" + body + "\n"
 
 
 def build_schedule_md(data: Dict, now=None) -> str:
-    """生成日程 markdown（含 YAML frontmatter）"""
+    """生成日程 markdown。对齐博客最新 schedules 格式（2026-08 参照）：
+
+    - 字符串带双引号、date/allDay/isLunar 等不带；空 location/repeat/person 不写
+    - 农历生日（isLunar）：不写 date，写 isLunar/lunarMonth/lunarDay，
+      文件名用 lunar-M-D 前缀（对齐 lunar-8-24-我的生日.md）
+    - 普通日程：全天只写日期，非全天写到秒
+    """
     now = now or now_shanghai()
     title = str(data.get("title") or "日程").strip() or "日程"
-    date_val = data.get("date") or now
-    if isinstance(date_val, datetime):
-        all_day = data.get("allDay")
-        if all_day is None:
-            # 若时间部分为 00:00:00 则视为全天
-            all_day = date_val.hour == 0 and date_val.minute == 0 and date_val.second == 0
-        if all_day:
-            date_str = date_val.strftime("%Y-%m-%d")
-        else:
-            date_str = date_val.strftime("%Y-%m-%d %H:%M:%S")
-    else:
-        date_str = str(date_val).strip() or now.strftime("%Y-%m-%d")
-        all_day = bool(data.get("allDay", False))
     priority = str(data.get("priority") or "none").strip()
     if priority not in SCHEDULE_PRIORITIES:
         # 兼容中文优先级误传入
@@ -1255,26 +1319,45 @@ def build_schedule_md(data: Dict, now=None) -> str:
     category = str(data.get("category") or "schedule").strip() or "schedule"
     if category not in ("schedule", "birthday", "anniversary", "holiday"):
         category = "schedule"
+    person = str(data.get("person") or "").strip()
     fm: Dict[str, Any] = {
         "title": title,
-        "date": date_str,
-        "allDay": bool(all_day),
-        "priority": priority,
-        "status": status,
-        "location": location,
-        "repeat": repeat,
-        "category": category,
     }
-    # 可选 endDate
-    if data.get("endDate"):
+    is_lunar = bool(data.get("isLunar"))
+    if is_lunar:
+        # 农历：不写 date，由博客端 lunar-javascript 换算
+        fm["allDay"] = bool(data.get("allDay", True))
+    else:
+        date_val = data.get("date") or now
+        all_day = data.get("allDay")
+        if isinstance(date_val, datetime):
+            if all_day is None:
+                all_day = date_val.hour == 0 and date_val.minute == 0 and date_val.second == 0
+            date_str = date_val.strftime("%Y-%m-%d") if all_day else date_val.strftime("%Y-%m-%d %H:%M:%S")
+        else:
+            date_str = str(date_val).strip() or now.strftime("%Y-%m-%d")
+            all_day = bool(data.get("allDay", False))
+        fm["date"] = date_str
+        fm["allDay"] = bool(all_day)
+    fm["priority"] = priority
+    fm["status"] = status
+    if location:
+        fm["location"] = location
+    if repeat:
+        fm["repeat"] = repeat
+    fm["category"] = category
+    if person:
+        fm["person"] = person
+    if is_lunar:
+        fm["isLunar"] = True
+        fm["lunarMonth"] = int(data.get("lunarMonth") or 1)
+        fm["lunarDay"] = int(data.get("lunarDay") or 1)
+    # 可选 endDate（仅非农历）
+    if not is_lunar and data.get("endDate"):
         end_val = data.get("endDate")
         if isinstance(end_val, datetime):
-            # 与 date 保持同格式
-            if all_day:
-                fm["endDate"] = end_val.strftime("%Y-%m-%d")
-            else:
-                fm["endDate"] = end_val.strftime("%Y-%m-%d %H:%M:%S")
+            fm["endDate"] = end_val.strftime("%Y-%m-%d")
         else:
             fm["endDate"] = str(end_val)
     body = str(data.get("description") or data.get("body") or title).strip()
-    return _dump_yaml(fm) + "\n\n" + body + "\n"
+    return _dump_yaml(fm, quote_all=True) + "\n\n" + body + "\n"

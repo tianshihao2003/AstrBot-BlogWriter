@@ -477,10 +477,10 @@ class TestFlow(unittest.TestCase):
         self.assertIn("发布成功", replies[0])
         path, md = self.plugin.committed[0]
         self.assertTrue(path.startswith("src/content/life/places/"))
-        self.assertIn("province: 陕西", md)
+        self.assertIn('province: "陕西"', md)
         self.assertIn("lat: 34.477861", md)
         self.assertIn("lng: 110.084789", md)
-        self.assertIn("experience: 去找宝宝了", md)
+        self.assertIn('experience: "去找宝宝了"', md)
         # 足迹照片不再单独放 places 目录，统一用 imgbed_upload_folder（默认 blog/moments）
         self.assertEqual(self.plugin.last_upload_folder, "blog/moments")
         tmp.unlink(missing_ok=True)
@@ -504,7 +504,7 @@ class TestFlow(unittest.TestCase):
         path, md = self.plugin.committed[0]
         self.assertEqual(path, "src/content/album/情侣头像.md")
         self.assertIn("title: 情侣头像", md)
-        self.assertIn("imgbedFolder: blog/album/情侣头像", md)
+        self.assertIn('imgbedFolder: "blog/album/情侣头像"', md)
         self.assertNotIn("photos:", md)
         self.assertEqual(len(self.plugin._sessions), 0)
         tmp.unlink(missing_ok=True)
@@ -625,8 +625,8 @@ class TestFlow(unittest.TestCase):
         self.assertEqual(len(self.plugin._sessions), 0)
 
 
-class TestBillScheduleAI(unittest.TestCase):
-    """Task 3: 粘合层 LLM 抽取 + 会话 + GitHub 提交"""
+class TestBillSchedule(unittest.TestCase):
+    """粘合层账单/日程（纯正则解析，2026-08 已移除 AI 抽取）+ 会话 + GitHub 提交"""
 
     def setUp(self):
         self.config = {
@@ -634,13 +634,11 @@ class TestBillScheduleAI(unittest.TestCase):
             "github_repo": "tianshihao2003/dumplingandcakeblog",
             "github_branch": "main",
             "allow_users": ["u1"],
-            "enable_ai_bill_schedule": True,
             "bill_default_account": "微信",
             "bill_default_category": "其他",
             "schedule_default_priority": "none",
             "schedule_remind_before": 10,
         }
-        import json as _json
 
         import main as plugin_main
 
@@ -662,49 +660,11 @@ class TestBillScheduleAI(unittest.TestCase):
             async def terminate(self):
                 pass
 
-        # 创建插件实例，context 带 get_using_llm stub 能力
         self.plugin = Stubbed(context=types.SimpleNamespace(), config=dict(self.config))
         self.plugin.committed = []
         self.plugin.scheduled = []
         self.plugin.last_upload_folder = None
         self.plugin.album_index_result = {"titles": {}, "files": {}}
-        # 默认 LLM stub：返回账单/日程固定 JSON
-        class StubLLM:
-            async def chat(self, messages):
-                # 根据最后一条 user 内容判断返回账单或日程
-                user_text = ""
-                for m in messages:
-                    if m.get("role") == "user":
-                        user_text = m.get("content", "")
-                if "周会" in user_text or "会议" in user_text:
-                    return _json.dumps(
-                        {
-                            "title": "周会",
-                            "date": "2026-08-22 15:00:00",
-                            "priority": "high",
-                            "location": "会议室A",
-                            "repeat": "每周",
-                            "remind_before": 15,
-                            "allDay": False,
-                        },
-                        ensure_ascii=False,
-                    )
-                # 默认账单
-                return _json.dumps(
-                    {
-                        "title": "午餐",
-                        "amount": -32,
-                        "type": "expense",
-                        "category": "餐饮",
-                        "account": "微信",
-                        "date": "2026-08-21",
-                        "description": "午餐",
-                    },
-                    ensure_ascii=False,
-                )
-
-        self.stub_llm = StubLLM()
-        self.plugin.context.get_using_llm = lambda: self.stub_llm
 
     async def _send(self, text, messages=None, sender="u1"):
         ev = types.SimpleNamespace(
@@ -720,45 +680,13 @@ class TestBillScheduleAI(unittest.TestCase):
             out.append(r)
         return [o.text for o in out]
 
-    def test_try_ai_extract_bill(self):
-        # 验证 _try_ai_extract 存在且能解析 stub LLM 固定 JSON
-        result = asyncio.get_event_loop().run_until_complete(
-            self.plugin._try_ai_extract("今天午餐微信花了32", "bill")
-        )
-        self.assertIsNotNone(result)
-        self.assertEqual(result.get("amount"), -32)
-        self.assertEqual(result.get("category"), "餐饮")
-
-    def test_try_ai_extract_schedule(self):
-        result = asyncio.get_event_loop().run_until_complete(
-            self.plugin._try_ai_extract("明天下午3点在会议室A开周会 每周重复 提前15分钟", "schedule")
-        )
-        self.assertIsNotNone(result)
-        self.assertEqual(result.get("title"), "周会")
-        self.assertEqual(result.get("priority"), "high")
-
-    def test_try_ai_extract_disabled(self):
-        self.plugin.config["enable_ai_bill_schedule"] = False
-        result = asyncio.get_event_loop().run_until_complete(
-            self.plugin._try_ai_extract("今天午餐微信花了32", "bill")
-        )
-        self.assertIsNone(result)
-
-    def test_try_ai_extract_no_llm(self):
-        # 移除 LLM 能力，hasattr 探测应返回 None
-        delattr(self.plugin.context, "get_using_llm")
-        result = asyncio.get_event_loop().run_until_complete(
-            self.plugin._try_ai_extract("今天午餐微信花了32", "bill")
-        )
-        self.assertIsNone(result)
-
     def test_start_bill_empty_creates_session(self):
         replies = asyncio.get_event_loop().run_until_complete(self._send("/账单"))
         self.assertTrue(any("账单" in r for r in replies))
         self.assertIn("u1", self.plugin._sessions)
         self.assertEqual(self.plugin._sessions["u1"].kind, "bill")
 
-    def test_start_bill_with_ai_success(self):
+    def test_start_bill_regex(self):
         replies = asyncio.get_event_loop().run_until_complete(self._send("/账单 今天午餐微信花了32"))
         self.assertTrue(any("已识别" in r or "账单" in r for r in replies))
         sess = self.plugin._sessions.get("u1")
@@ -766,24 +694,26 @@ class TestBillScheduleAI(unittest.TestCase):
         self.assertEqual(sess.kind, "bill")
         self.assertEqual(sess.meta.get("amount"), -32)
         self.assertEqual(sess.meta.get("category"), "餐饮")
+        self.assertEqual(sess.meta.get("account"), "微信")
 
-    def test_start_bill_fallback_regex_when_ai_fail(self):
-        # 让 LLM 抛异常，触发正则兜底
-        class FailLLM:
-            async def chat(self, messages):
-                raise RuntimeError("llm error")
-
-        self.plugin.context.get_using_llm = lambda: FailLLM()
-        replies = asyncio.get_event_loop().run_until_complete(self._send("/账单 发工资12000 银行卡"))
+    def test_start_bill_income_regex(self):
+        asyncio.get_event_loop().run_until_complete(self._send("/账单 发工资12000 银行卡"))
         sess = self.plugin._sessions.get("u1")
         self.assertIsNotNone(sess)
         self.assertEqual(sess.kind, "bill")
-        # 正则兜底：收入类型
         self.assertEqual(sess.meta.get("type"), "income")
         self.assertEqual(sess.meta.get("amount"), 12000)
 
-    def test_start_schedule_with_ai_success(self):
-        replies = asyncio.get_event_loop().run_until_complete(self._send("/日程 明天下午3点在会议室A开周会 每周重复 提前15分钟"))
+    def test_start_bill_batch_regex(self):
+        replies = asyncio.get_event_loop().run_until_complete(self._send("/账单 午餐30晚餐45打车12"))
+        sess = self.plugin._sessions.get("u1")
+        self.assertIsNotNone(sess)
+        self.assertEqual(sess.kind, "bill_batch")
+        items = sess.meta.get("items")
+        self.assertEqual(len(items), 3)
+
+    def test_start_schedule_regex(self):
+        replies = asyncio.get_event_loop().run_until_complete(self._send("/日程 明天下午3点高优在会议室A开周会 每周重复 提前15分钟"))
         sess = self.plugin._sessions.get("u1")
         self.assertIsNotNone(sess)
         self.assertEqual(sess.kind, "schedule")
@@ -791,8 +721,8 @@ class TestBillScheduleAI(unittest.TestCase):
         self.assertEqual(sess.meta.get("priority"), "high")
         self.assertEqual(sess.meta.get("location"), "会议室A")
 
-    def test_bill_session_next_message_ai_extract(self):
-        # 空会话后下一句口语触发 AI 抽取
+    def test_bill_session_next_message_regex(self):
+        # 空会话后下一句口语触发正则解析
         asyncio.get_event_loop().run_until_complete(self._send("/账单"))
         self.assertEqual(self.plugin._sessions["u1"].kind, "bill")
         replies = asyncio.get_event_loop().run_until_complete(self._send("今天午餐微信花了32"))
@@ -800,16 +730,33 @@ class TestBillScheduleAI(unittest.TestCase):
         self.assertIsNotNone(sess)
         self.assertEqual(sess.meta.get("amount"), -32)
 
+    def test_schedule_session_next_message_regex(self):
+        asyncio.get_event_loop().run_until_complete(self._send("/日程"))
+        self.assertEqual(self.plugin._sessions["u1"].kind, "schedule")
+        asyncio.get_event_loop().run_until_complete(self._send("明天下午3点在会议室A开周会"))
+        sess = self.plugin._sessions.get("u1")
+        self.assertEqual(sess.kind, "schedule")
+        self.assertEqual(sess.meta.get("title"), "周会")
+
+    def test_natural_language_without_command_passthrough(self):
+        # 2026-08 移除免命令自然语言识别：无会话时口语账单/日程一律静默放行
+        replies = asyncio.get_event_loop().run_until_complete(self._send("今天午餐微信花了32"))
+        self.assertEqual(len(replies), 0)
+        self.assertNotIn("u1", self.plugin._sessions)
+        replies = asyncio.get_event_loop().run_until_complete(self._send("明天下午3点开周会"))
+        self.assertEqual(len(replies), 0)
+
     def test_publish_bill(self):
-        # 直接通过 AI 创建会话后发布
         asyncio.get_event_loop().run_until_complete(self._send("/账单 今天午餐微信花了32"))
         replies = asyncio.get_event_loop().run_until_complete(self._send("/发布"))
         self.assertTrue(any("发布成功" in r for r in replies))
         self.assertEqual(len(self.plugin.committed), 1)
         path, md = self.plugin.committed[0]
         self.assertTrue(path.startswith("src/content/bills/"))
+        # 2026-08 新格式：字符串带引号、tags 行内数组
         self.assertIn("amount: -32", md)
-        self.assertIn("category: 餐饮", md)
+        self.assertIn('category: "餐饮"', md)
+        self.assertIn('tags: ["餐饮"]', md)
 
     def test_publish_schedule_and_remind(self):
         asyncio.get_event_loop().run_until_complete(self._send("/日程 明天下午3点在会议室A开周会 每周重复 提前15分钟"))
@@ -818,10 +765,28 @@ class TestBillScheduleAI(unittest.TestCase):
         self.assertEqual(len(self.plugin.committed), 1)
         path, md = self.plugin.committed[0]
         self.assertTrue(path.startswith("src/content/schedules/"))
-        self.assertIn("title: 周会", md)
+        self.assertIn('title: "周会"', md)
         # 含时间的日程应调度提醒
         self.assertEqual(len(self.plugin.scheduled), 1)
         self.assertEqual(self.plugin.scheduled[0][1], "周会")
+
+    def test_publish_schedule_batch_lunar(self):
+        # 批量农历生日：文件名 lunar-M-D 前缀、md 含 isLunar/lunarMonth/lunarDay、无 date、不调度提醒
+        replies = asyncio.get_event_loop().run_until_complete(self._send("/日程 我的生日农历8.24对象12.22妈8.7都是农历"))
+        sess = self.plugin._sessions.get("u1")
+        self.assertEqual(sess.kind, "schedule_batch")
+        self.assertEqual(len(sess.meta["items"]), 3)
+        replies = asyncio.get_event_loop().run_until_complete(self._send("/发布"))
+        self.assertTrue(any("批量发布成功" in r for r in replies))
+        self.assertEqual(len(self.plugin.committed), 3)
+        first_path, first_md = self.plugin.committed[0]
+        self.assertTrue(first_path.startswith("src/content/schedules/lunar-8-24-"))
+        self.assertIn("isLunar: true", first_md)
+        self.assertIn("lunarMonth: 8", first_md)
+        self.assertIn("lunarDay: 24", first_md)
+        self.assertNotIn("date:", first_md)
+        # 全天生日不调度提醒
+        self.assertEqual(len(self.plugin.scheduled), 0)
 
     def test_remind_command(self):
         replies = asyncio.get_event_loop().run_until_complete(self._send("/提醒"))

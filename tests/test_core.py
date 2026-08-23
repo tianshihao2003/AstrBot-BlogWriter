@@ -44,7 +44,9 @@ from blog_writer_core import (  # noqa: E402
     parse_note,
     parse_place,
     parse_schedule,
+    parse_schedules_batch,
     place_filename,
+    schedule_filename,
     upload_base_host,
     validate_friend_data,
     with_suffix,
@@ -235,6 +237,10 @@ class TestMarkdown(unittest.TestCase):
 
     def test_place_md(self):
         md = build_place_md("陕西", "华阴市华山", "去找宝宝了", ["https://img.tsh520.cn/file/places/x.jpg"], 34.477861, 110.084789, ["旅游"], datetime(2026, 8, 8))
+        # 2026-08 新格式：新增 description 固定句式，不再写 visitCount（schema 默认 1）
+        self.assertIn('description: "记录在陕西华阴市华山的足迹。"', md)
+        self.assertNotIn("visitCount", md)
+        self.assertIn('tags: ["旅游"]', md)
         if yaml:
             fm = yaml.safe_load(md.split("---")[1])
             self.assertEqual(fm["province"], "陕西")
@@ -242,7 +248,7 @@ class TestMarkdown(unittest.TestCase):
             self.assertEqual(fm["experience"], "去找宝宝了")
             self.assertEqual(fm["lat"], 34.477861)
             self.assertEqual(fm["lng"], 110.084789)
-            self.assertEqual(fm["visitCount"], 1)
+            self.assertNotIn("visitCount", fm)
             self.assertEqual(fm["photos"], ["https://img.tsh520.cn/file/places/x.jpg"])
             self.assertEqual(fm["tags"], ["旅游"])
 
@@ -251,14 +257,16 @@ class TestMarkdown(unittest.TestCase):
         if yaml:
             fm = yaml.safe_load(md.split("---")[1])
             self.assertNotIn("experience", fm)
+            self.assertNotIn("photos", fm)
 
     def test_album_md(self):
-        # 对齐博客相册图床化惯例（2026-08-13）：仅 title/date/imgbedFolder，无 photos 列表
+        # 对齐博客相册惯例（2026-08）：title/subtitle/date + imgbedFolder（带引号），无 photos 列表
         md = build_album_md("情侣头像", "blog/album/情侣头像", datetime(2026, 8, 13))
         self.assertIn("title: 情侣头像", md)
+        self.assertIn("subtitle: 记录情侣头像", md)
         self.assertIn("date: 2026-08-13", md)
         self.assertNotIn('"date"', md)
-        self.assertIn("imgbedFolder: blog/album/情侣头像", md)
+        self.assertIn('imgbedFolder: "blog/album/情侣头像"', md)
         self.assertNotIn("photos:", md)
         if yaml:
             fm = yaml.safe_load(md.split("---")[1])
@@ -276,18 +284,22 @@ class TestMarkdown(unittest.TestCase):
 
     def test_yaml_numeric_tag_quoted(self):
         # 纯数字字符串必须加引号，否则 YAML 解析成 int，zod z.array(z.string()) 校验失败
+        # （2026-08 起 places 用行内数组：tags: ["旅游", "2026"]）
         md = build_place_md("河南", "安阳", "", [], 36.1, 114.3, ["旅游", "2026"], datetime(2026, 8, 8))
-        self.assertIn('- "2026"', md)
+        self.assertIn('"2026"', md)
         if yaml:
             fm = yaml.safe_load(md.split("---")[1])
             self.assertEqual(fm["tags"], ["旅游", "2026"])
 
     def test_yaml_url_unquoted(self):
-        # URL 裸写，对齐现有数据风格（- https://img.tsh520.cn/file/places/xxx.jpg）
-        md = build_place_md("陕西", "华山", "", ["https://img.tsh520.cn/file/places/x.jpg"], 1.0, 2.0, ["旅游"], datetime(2026, 8, 8))
+        # 动态（plain 风格）URL 仍裸写，对齐现有 moments 数据风格
+        md = build_moment_md("内容", ["https://img.tsh520.cn/file/places/x.jpg"], ["日常"], datetime(2026, 8, 8))
         self.assertIn("  - https://img.tsh520.cn/file/places/x.jpg", md)
+        # 足迹（quoted 风格，2026-08 对齐博客新格式）photos 带引号
+        md2 = build_place_md("陕西", "华山", "", ["https://img.tsh520.cn/file/places/x.jpg"], 1.0, 2.0, ["旅游"], datetime(2026, 8, 8))
+        self.assertIn('  - "https://img.tsh520.cn/file/places/x.jpg"', md2)
         if yaml:
-            fm = yaml.safe_load(md.split("---")[1])
+            fm = yaml.safe_load(md2.split("---")[1])
             self.assertEqual(fm["photos"], ["https://img.tsh520.cn/file/places/x.jpg"])
 
 
@@ -505,8 +517,10 @@ class TestFriend(unittest.TestCase):
             fm = yaml.safe_load(md.split("---")[1])
             self.assertEqual(fm["title"], "张三")
             self.assertEqual(fm["siteurl"], "https://z.com")
-            self.assertEqual(fm["weight"], 10)
+            # 2026-08 对齐现有友链文件：weight 0、末尾 group: other
+            self.assertEqual(fm["weight"], 0)
             self.assertTrue(fm["enabled"])
+            self.assertEqual(fm["group"], "other")
 
     def test_clean_filename(self):
         self.assertEqual(clean_filename_part("张三的博客"), "张三的博客")
@@ -546,8 +560,12 @@ class TestBillSchedule(unittest.TestCase):
             },
             datetime(2026, 8, 21),
         )
+        # 2026-08 对齐博客最新 bills 格式：字符串带引号、tags 行内数组、date/amount 不带
         self.assertIn("amount: -32", md)
-        self.assertIn("category: 餐饮", md)
+        self.assertIn('category: "餐饮"', md)
+        self.assertIn('title: "午餐"', md)
+        self.assertIn("date: 2026-08-21", md)
+        self.assertIn('tags: ["餐饮"]', md)
 
     def test_parse_schedule_natural(self):
         data, _ = parse_schedule("明天下午3点高优在会议室A开周会 每周重复 提前15分钟")
@@ -562,7 +580,48 @@ class TestBillSchedule(unittest.TestCase):
             {"title": "周会", "date": datetime(2026, 8, 22, 15, 0), "priority": "high", "location": "会议室A"},
             datetime(2026, 8, 22),
         )
-        self.assertIn("title: 周会", md)
+        # 2026-08 对齐博客最新 schedules 格式：字符串带引号
+        self.assertIn('title: "周会"', md)
+        self.assertIn("date: 2026-08-22 15:00:00", md)
+        if yaml:
+            fm = yaml.safe_load(md.split("---")[1])
+            self.assertEqual(fm["title"], "周会")
+            self.assertEqual(fm["location"], "会议室A")
+
+    def test_build_schedule_md_empty_fields_omitted(self):
+        # 空地点/重复不写字段（对齐现有文件：示例占位无 location/repeat）
+        md = build_schedule_md({"title": "示例", "date": datetime(2026, 8, 22), "allDay": True}, datetime(2026, 8, 22))
+        self.assertNotIn("location:", md)
+        self.assertNotIn("repeat:", md)
+        self.assertIn("date: 2026-08-22\n", md)  # 全天只写日期
+
+    def test_schedules_batch_lunar(self):
+        # 2026-08 农历生日：isLunar/lunarMonth/lunarDay，不存公历 date
+        items, err = parse_schedules_batch("我的生日农历8.24对象12.22妈8.7大姐11.22爸12.14二姐4.4都是农历")
+        self.assertEqual(err, "")
+        self.assertEqual(len(items), 6)
+        persons = [it["person"] for it in items]
+        self.assertEqual(persons, ["我", "对象", "我妈", "大姐", "我爸", "二姐"])
+        first = items[0]
+        self.assertTrue(first["isLunar"])
+        self.assertEqual(first["lunarMonth"], 8)
+        self.assertEqual(first["lunarDay"], 24)
+        self.assertNotIn("date", first)
+        md = build_schedule_md(first)
+        self.assertIn("isLunar: true", md)
+        self.assertIn("lunarMonth: 8", md)
+        self.assertIn("lunarDay: 24", md)
+        self.assertNotIn("date:", md)
+        self.assertEqual(schedule_filename(first), "lunar-8-24")
+
+    def test_schedules_batch_solar(self):
+        # 公历生日：存 date（今年已过则顺延明年）
+        items, err = parse_schedules_batch("我生日3.15对象生日9.20")
+        self.assertEqual(err, "")
+        self.assertEqual(len(items), 2)
+        self.assertFalse(items[0]["isLunar"])
+        self.assertIn("date", items[0])
+        self.assertEqual(schedule_filename(items[0], datetime(2026, 8, 23)), "2027-03-15")
 
 
 if __name__ == "__main__":
