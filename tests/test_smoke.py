@@ -792,6 +792,81 @@ class TestBillSchedule(unittest.TestCase):
         replies = asyncio.get_event_loop().run_until_complete(self._send("/提醒"))
         self.assertTrue(any("提醒" in r for r in replies))
 
+    def test_start_birthday_single(self):
+        replies = asyncio.get_event_loop().run_until_complete(self._send("/生日 我的生日农历8.24"))
+        self.assertTrue(any("已识别生日" in r for r in replies))
+        sess = self.plugin._sessions.get("u1")
+        self.assertIsNotNone(sess)
+        self.assertEqual(sess.kind, "schedule")
+        self.assertEqual(sess.meta.get("category"), "birthday")
+        self.assertTrue(sess.meta.get("isLunar"))
+        self.assertEqual(sess.meta.get("lunarMonth"), 8)
+        self.assertEqual(sess.meta.get("lunarDay"), 24)
+        self.assertEqual(sess.meta.get("repeat"), "每年")
+
+    def test_start_birthday_batch(self):
+        replies = asyncio.get_event_loop().run_until_complete(self._send("/生日 我的农历8.24对象12.22妈8.7都是农历"))
+        sess = self.plugin._sessions.get("u1")
+        self.assertEqual(sess.kind, "schedule_batch")
+        items = sess.meta["items"]
+        self.assertEqual(len(items), 3)
+        self.assertEqual([i["person"] for i in items], ["我", "对象", "我妈"])
+        self.assertTrue(all(i.get("category") == "birthday" for i in items))
+
+    def test_birthday_session_empty_then_text(self):
+        # /生日 空会话 → 发文本解析
+        asyncio.get_event_loop().run_until_complete(self._send("/生日"))
+        self.assertEqual(self.plugin._sessions["u1"].kind, "birthday")
+        replies = asyncio.get_event_loop().run_until_complete(self._send("我的农历8.24"))
+        sess = self.plugin._sessions.get("u1")
+        self.assertEqual(sess.kind, "schedule")
+        self.assertTrue(sess.meta.get("isLunar"))
+
+    def test_publish_birthday_single_lunar(self):
+        asyncio.get_event_loop().run_until_complete(self._send("/生日 我的生日农历8.24"))
+        replies = asyncio.get_event_loop().run_until_complete(self._send("/发布"))
+        self.assertTrue(any("发布成功" in r for r in replies))
+        path, md = self.plugin.committed[0]
+        self.assertTrue(path.startswith("src/content/schedules/lunar-8-24-我生日"))
+        self.assertIn('category: "birthday"', md)
+        self.assertIn("isLunar: true", md)
+        # 全天生日不调度提醒
+        self.assertEqual(len(self.plugin.scheduled), 0)
+
+    def test_start_and_publish_anniversary(self):
+        replies = asyncio.get_event_loop().run_until_complete(self._send("/纪念日 我和宝宝认识的纪念日 1月1日 @宝宝"))
+        self.assertTrue(any("已识别纪念日" in r for r in replies))
+        sess = self.plugin._sessions.get("u1")
+        self.assertEqual(sess.meta.get("category"), "anniversary")
+        self.assertEqual(sess.meta.get("person"), "宝宝")
+        self.assertEqual(sess.meta.get("repeat"), "每年")
+        replies = asyncio.get_event_loop().run_until_complete(self._send("/发布"))
+        self.assertTrue(any("发布成功" in r for r in replies))
+        path, md = self.plugin.committed[0]
+        self.assertTrue(path.startswith("src/content/schedules/2026-01-01-"))
+        self.assertIn('category: "anniversary"', md)
+        self.assertIn('person: "宝宝"', md)
+        self.assertEqual(len(self.plugin.scheduled), 0)
+
+    def test_schedule_intercepts_birthday(self):
+        # 防呆：/日程 发生日内容应提示改用 /生日，不建会话
+        replies = asyncio.get_event_loop().run_until_complete(self._send("/日程 我的生日农历8.24"))
+        self.assertTrue(any("/生日" in r for r in replies))
+        self.assertNotIn("u1", self.plugin._sessions)
+
+    def test_schedule_intercepts_anniversary(self):
+        replies = asyncio.get_event_loop().run_until_complete(self._send("/日程 结婚纪念日 5月20"))
+        self.assertTrue(any("/纪念日" in r for r in replies))
+        self.assertNotIn("u1", self.plugin._sessions)
+
+    def test_schedule_normal_still_works(self):
+        # 防呆不影响普通日程
+        asyncio.get_event_loop().run_until_complete(self._send("/日程 明天下午3点高优在会议室A开周会 每周"))
+        sess = self.plugin._sessions.get("u1")
+        self.assertEqual(sess.kind, "schedule")
+        self.assertEqual(sess.meta.get("title"), "周会")
+        self.assertEqual(sess.meta.get("category", "schedule"), "schedule")
+
     def test_bill_non_whitelist_silent(self):
         # 白名单外用户发账单应静默
         replies = asyncio.get_event_loop().run_until_complete(self._send("/账单 今天午餐花了10", sender="hacker"))

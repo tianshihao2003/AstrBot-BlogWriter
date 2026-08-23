@@ -21,7 +21,7 @@ def now_shanghai() -> datetime:
 SESSION_TIMEOUT = timedelta(minutes=30)
 MAX_PATH_SUFFIX = 10
 
-COMMANDS = ("动态", "笔记", "足迹", "友链", "相册", "账单", "日程", "提醒", "发布", "取消", "状态", "帮助")
+COMMANDS = ("动态", "笔记", "足迹", "友链", "相册", "账单", "日程", "生日", "纪念日", "提醒", "发布", "取消", "状态", "帮助")
 
 BILL_CATEGORIES = ["餐饮", "交通", "住房", "工资", "居家生活", "交流通讯", "食品酒水", "职业收入", "人情收礼", "其他"]
 BILL_ACCOUNTS = ["微信", "支付宝", "银行卡", "现金", "其他"]
@@ -1256,6 +1256,89 @@ def schedule_filename(data: Dict, now: datetime = None) -> str:
     if isinstance(date_val, str) and date_val.strip():
         return date_val.strip()[:10]
     return base.strftime("%Y-%m-%d")
+
+
+def parse_anniversary(text: str, now=None) -> Tuple[Optional[Dict], str]:
+    """解析纪念日自然语言：标题 + 日期（公历/农历）+ 可选 @人物。
+
+    示例：
+      /纪念日 我和宝宝认识的纪念日 1月1日 @宝宝
+      /纪念日 结婚纪念日 农历5月20
+      /纪念日 领证纪念日 2026-05-20
+
+    产出固定：repeat=每年、allDay=True、category=anniversary；
+    农历日期存 isLunar/lunarMonth/lunarDay（无 date），公历存 date。
+    """
+    now = now or now_shanghai()
+    raw = (text or "").strip()
+    if not raw:
+        return None, "内容为空"
+
+    person = ""
+    m_person = re.search(r"@(\S{1,10})", raw)
+    if m_person:
+        person = m_person.group(1).strip()
+        raw = re.sub(r"@\S{1,10}", "", raw).strip()
+
+    is_lunar = False
+    has_year = False
+    year = now.year
+    month = day = None
+
+    # 农历优先：农历5月20 / 农历5.20 / 农历5-20
+    m_lunar = re.search(r"农历\s*(\d{1,2})\s*[.\-月]\s*(\d{1,2})\s*日?", raw)
+    if m_lunar:
+        is_lunar = True
+        month = int(m_lunar.group(1))
+        day = int(m_lunar.group(2))
+    else:
+        # 带年公历：2026-01-01 / 2026年1月1日 / 2026.1.1
+        m_ymd = re.search(r"(\d{4})\s*[.\-年]\s*(\d{1,2})\s*[.\-月]\s*(\d{1,2})\s*日?", raw)
+        if m_ymd:
+            has_year = True
+            year = int(m_ymd.group(1))
+            month = int(m_ymd.group(2))
+            day = int(m_ymd.group(3))
+        else:
+            # 月日公历：1月1日 / 1.1 / 1-1（年份用当前年）
+            m_md = re.search(r"(\d{1,2})\s*[.\-月]\s*(\d{1,2})\s*日?", raw)
+            if m_md:
+                month = int(m_md.group(1))
+                day = int(m_md.group(2))
+
+    if month is None:
+        return None, "未识别到日期（支持 1月1日 / 2026-01-01 / 农历5月20）"
+
+    data: Dict[str, Any] = {
+        "title": "",
+        "priority": "none",
+        "location": "",
+        "repeat": "每年",
+        "remind_before": 10,
+        "allDay": True,
+        "category": "anniversary",
+        "person": person,
+    }
+    if is_lunar:
+        data["isLunar"] = True
+        data["lunarMonth"] = month
+        data["lunarDay"] = day
+        if not (1 <= month <= 12 and 1 <= day <= 30):
+            return None, "农历日期超出范围（月 1-12，日 1-30）"
+    else:
+        try:
+            data["date"] = datetime(year, month, day)
+        except ValueError:
+            return None, "公历日期无效：{}-{}-{}".format(year, month, day)
+
+    # 标题 = 移除日期词、农历字样、@人物后的剩余文本
+    cleaned = raw
+    cleaned = re.sub(r"\d{4}\s*[.\-年]\s*\d{1,2}\s*[.\-月]\s*\d{1,2}\s*日?", "", cleaned)
+    cleaned = re.sub(r"\d{1,2}\s*[.\-月]\s*\d{1,2}\s*日?", "", cleaned)
+    cleaned = cleaned.replace("农历", "")
+    cleaned = re.sub(r"\s+", " ", cleaned).strip(" ，,。")
+    data["title"] = cleaned[:30].strip() or "纪念日"
+    return data, ""
 
 
 def build_bill_md(data: Dict, now=None) -> str:

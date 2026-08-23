@@ -91,6 +91,7 @@ try:
         parse_amap_response,
         parse_album,
         parse_album_frontmatter,
+        parse_anniversary,
         parse_bill,
         parse_bills_batch,
         parse_dynamic,
@@ -138,6 +139,7 @@ except ImportError:  # 兼容非包形式加载
         parse_amap_response,
         parse_album,
         parse_album_frontmatter,
+        parse_anniversary,
         parse_bill,
         parse_bills_batch,
         parse_dynamic,
@@ -564,7 +566,7 @@ class BlogWriter(Star):
         if not text:
             self._sessions[user_id] = Session("schedule", {})
             return event.plain_result("日程会话已创建，请发送日程内容（如：明天下午3点在会议室A开周会），发 /发布 提交，发 /取消 放弃。")
-        # 批量正则（一句含多个生日，如“我的生日农历8.24对象12.22妈8.7都是农历”）
+        # 批量正则（一句含多个生日，如“我的生日农历8.24对象12.22妈8.7都是农历”；建议用 /生日）
         try:
             batch, _ = parse_schedules_batch(text)
             if batch and len(batch) > 1:
@@ -573,9 +575,14 @@ class BlogWriter(Star):
                 self._sessions[user_id] = Session("schedule_batch", {"items": batch})
                 titles = "、".join(x["title"] for x in batch[:5])
                 more = f"等{len(batch)}条" if len(batch) > 5 else ""
-                return event.plain_result(f"已识别 {len(batch)} 条生日：{titles}{more}，发 /发布 批量提交，发 /取消 放弃。")
+                return event.plain_result(f"已识别 {len(batch)} 条生日：{titles}{more}，发 /发布 批量提交，发 /取消 放弃。\n（提示：生日请优先用 /生日 命令）")
         except Exception:
             pass
+        # 防呆：生日/纪念日请用专用命令，避免 category 生成错
+        if "生日" in text or "生气" in text:
+            return event.plain_result("检测到生日内容，请用 /生日 命令添加（如：/生日 我的农历8.24，支持一句多个：/生日 我的农历8.24对象12.22妈8.7都是农历）。")
+        if "纪念日" in text:
+            return event.plain_result("检测到纪念日内容，请用 /纪念日 命令添加（如：/纪念日 我和宝宝认识的纪念日 1月1日 @宝宝，支持农历：/纪念日 结婚纪念日 农历5月20）。")
         # 单条正则
         parsed, err = parse_schedule(text)
         if parsed is None:
@@ -589,6 +596,57 @@ class BlogWriter(Star):
                 parsed.get("priority"),
             )
         )
+
+    def _fmt_birthday(self, item: Dict) -> str:
+        """生日条目摘要：我生日（农历8月24，每年）"""
+        if item.get("isLunar"):
+            when = "农历{}月{}".format(item.get("lunarMonth"), item.get("lunarDay"))
+        else:
+            dt = item.get("date")
+            when = dt.strftime("%m月%d日") if isinstance(dt, datetime) else str(dt)
+        return "{}（{}，每年重复）".format(item.get("title"), when)
+
+    async def _start_birthday(self, event: AstrMessageEvent, user_id: str, args: List[str], raw: str):
+        """/生日 —— 专用生日命令，category 固定 birthday，杜绝文件类型生成错。"""
+        text = " ".join(args).strip()
+        if not text:
+            self._sessions[user_id] = Session("birthday", {})
+            return event.plain_result(
+                "生日会话已创建，请发送生日内容（如：我的农历8.24、宝宝的 12.22），\n"
+                "支持一句多个：我的农历8.24对象12.22妈8.7都是农历。\n"
+                "发 /发布 提交，发 /取消 放弃。"
+            )
+        items, err = parse_schedules_batch(text)
+        if not items:
+            return event.plain_result("生日解析失败：{}，请重发（示例：我的农历8.24）或发 /取消。".format(err))
+        for item in items:
+            self._apply_schedule_defaults(item)
+        if len(items) == 1:
+            self._sessions[user_id] = Session("schedule", items[0])
+            return event.plain_result("已识别生日：{}。发 /发布 提交，发 /取消 放弃。".format(self._fmt_birthday(items[0])))
+        self._sessions[user_id] = Session("schedule_batch", {"items": items})
+        titles = "、".join(x["title"] for x in items[:5])
+        more = f"等{len(items)}条" if len(items) > 5 else ""
+        return event.plain_result(f"已识别 {len(items)} 条生日：{titles}{more}，发 /发布 批量提交，发 /取消 放弃。")
+
+    async def _start_anniversary(self, event: AstrMessageEvent, user_id: str, args: List[str], raw: str):
+        """/纪念日 —— 专用纪念日命令，category 固定 anniversary、每年重复、全天。"""
+        text = " ".join(args).strip()
+        if not text:
+            self._sessions[user_id] = Session("anniversary", {})
+            return event.plain_result(
+                "纪念日会话已创建，请发送纪念日内容（格式：标题 日期 [@人物]），如：\n"
+                "我和宝宝认识的纪念日 1月1日 @宝宝\n"
+                "结婚纪念日 农历5月20\n"
+                "发 /发布 提交，发 /取消 放弃。"
+            )
+        parsed, err = parse_anniversary(text)
+        if parsed is None:
+            return event.plain_result("纪念日解析失败：{}，请重发（示例：结婚纪念日 农历5月20）或发 /取消。".format(err))
+        self._apply_schedule_defaults(parsed)
+        self._sessions[user_id] = Session("schedule", parsed)
+        when = "农历{}月{}".format(parsed.get("lunarMonth"), parsed.get("lunarDay")) if parsed.get("isLunar") else parsed.get("date").strftime("%Y-%m-%d")
+        return event.plain_result("已识别纪念日：{}（{}，每年重复）。发 /发布 提交，发 /取消 放弃。".format(parsed.get("title"), when))
 
     def _handle_remind(self, event: AstrMessageEvent, user_id: str, args: List[str]):
         text = " ".join(args).strip().lower()
@@ -711,6 +769,12 @@ class BlogWriter(Star):
                 return
             if cmd == "日程":
                 yield await self._start_schedule(event, user_id, args, raw)
+                return
+            if cmd == "生日":
+                yield await self._start_birthday(event, user_id, args, raw)
+                return
+            if cmd == "纪念日":
+                yield await self._start_anniversary(event, user_id, args, raw)
                 return
             if cmd == "提醒":
                 yield self._handle_remind(event, user_id, args)
@@ -837,6 +901,39 @@ class BlogWriter(Star):
                             )
                         else:
                             yield event.plain_result("账单解析失败：{}，请重发。".format(err))
+                    elif session.kind == "birthday":
+                        # 生日会话：下一句口语走批量生日正则（支持单条与多个人物）
+                        items, err = parse_schedules_batch(text)
+                        if not items:
+                            yield event.plain_result("生日解析失败：{}，请重发（示例：我的农历8.24）。".format(err))
+                            return
+                        for item in items:
+                            self._apply_schedule_defaults(item)
+                        if len(items) == 1:
+                            session.meta.update(items[0])
+                            session.kind = "schedule"
+                        else:
+                            session.kind = "schedule_batch"
+                            session.meta = {"items": items}
+                        session.touch()
+                        titles = "、".join(x["title"] for x in items[:5])
+                        more = f"等{len(items)}条" if len(items) > 5 else ""
+                        yield event.plain_result(f"已识别生日：{titles}{more}。发 /发布 提交，发 /取消 放弃。")
+                        return
+                    elif session.kind == "anniversary":
+                        # 纪念日会话：下一句口语走纪念日正则
+                        parsed, err = parse_anniversary(text)
+                        if parsed is None:
+                            yield event.plain_result("纪念日解析失败：{}，请重发（示例：结婚纪念日 农历5月20）。".format(err))
+                            return
+                        self._apply_schedule_defaults(parsed)
+                        session.meta.update(parsed)
+                        session.kind = "schedule"
+                        session.touch()
+                        yield event.plain_result(
+                            "已识别纪念日：{}。发 /发布 提交，发 /取消 放弃。".format(parsed.get("title"))
+                        )
+                        return
                     elif session.kind in ("schedule", "schedule_batch"):
                         # 空会话后下一句口语：优先批量生日正则，再单条正则
                         try:
@@ -852,6 +949,13 @@ class BlogWriter(Star):
                                 return
                         except Exception:
                             pass
+                        # 防呆：生日/纪念日走专用命令
+                        if "生日" in text or "生气" in text:
+                            yield event.plain_result("检测到生日内容，请取消后用 /生日 命令添加（如：/生日 我的农历8.24）。")
+                            return
+                        if "纪念日" in text:
+                            yield event.plain_result("检测到纪念日内容，请取消后用 /纪念日 命令添加（如：/纪念日 结婚纪念日 农历5月20）。")
+                            return
                         parsed, err = parse_schedule(text)
                         if parsed:
                             self._apply_schedule_defaults(parsed)
@@ -1091,9 +1195,9 @@ class BlogWriter(Star):
                 if fails:
                     return event.plain_result(f"批量账单发布完成：成功{success}条，失败{len(fails)}条：{'; '.join(fails[:3])}")
                 return event.plain_result(f"批量账单发布成功 ✅ 共{success}条，已写入 bills。")
-            elif session.kind == "schedule":
+            elif session.kind in ("schedule", "birthday", "anniversary"):
                 if not session.meta or not session.meta.get("title"):
-                    return event.plain_result("日程信息不完整，请先发送日程内容。")
+                    return event.plain_result("日程/生日/纪念日信息不完整，请先发送内容（如：明天下午3点在会议室A开周会 / 我的农历8.24 / 结婚纪念日 农历5月20）。")
                 md = build_schedule_md(session.meta, now)
                 title = str(session.meta.get("title") or "日程").strip() or "日程"
                 slug = clean_filename_part(title)
@@ -1180,7 +1284,7 @@ class BlogWriter(Star):
             return event.plain_result("GitHub 提交失败：{}".format(err))
 
         # 日程提醒：成功后若为 schedule 且含时间则调用 _schedule_remind
-        if session.kind == "schedule":
+        if session.kind in ("schedule", "birthday", "anniversary"):
             try:
                 date_val = session.meta.get("date")
                 dt = None
@@ -1671,7 +1775,9 @@ class BlogWriter(Star):
             "/友链 —— 发友链（站点名称/描述/链接/头像链接，逐行发送自动识别）\n"
             "/相册 相册名 —— 发相册照片（随后直接发图，多张可多次发送）\n"
             "/账单 内容 —— 记账（自然语言正则解析，如：今天午餐微信花了32；支持一句多笔）\n"
-            "/日程 内容 —— 建日程（自然语言正则解析，如：明天下午3点在会议室A开周会 每周 提前15分钟；支持一句多个生日）\n"
+            "/日程 内容 —— 建日程（自然语言正则解析，如：明天下午3点在会议室A开周会 每周 提前15分钟）\n"
+            "/生日 内容 —— 添加生日（如：我的农历8.24；支持一句多个：我的农历8.24对象12.22妈8.7都是农历）\n"
+            "/纪念日 内容 —— 添加纪念日（标题 日期 [@人物]，如：结婚纪念日 农历5月20，每年重复）\n"
             "/提醒 列表 / 取消 标题 —— 查看/取消待提醒日程\n"
             "/发布 —— 结束并提交当前会话\n"
             "/取消 —— 放弃当前会话\n"

@@ -623,6 +623,53 @@ class TestBillSchedule(unittest.TestCase):
         self.assertIn("date", items[0])
         self.assertEqual(schedule_filename(items[0], datetime(2026, 8, 23)), "2027-03-15")
 
+    def test_parse_anniversary(self):
+        from blog_writer_core import parse_anniversary
+
+        # 公历月日 + @人物（对齐博客现有“我和宝宝认识的纪念日”）
+        data, err = parse_anniversary("我和宝宝认识的纪念日 1月1日 @宝宝", datetime(2026, 8, 23))
+        self.assertEqual(err, "")
+        self.assertEqual(data["title"], "我和宝宝认识的纪念日")
+        self.assertEqual(data["category"], "anniversary")
+        self.assertEqual(data["repeat"], "每年")
+        self.assertTrue(data["allDay"])
+        self.assertEqual(data["person"], "宝宝")
+        self.assertEqual(data["date"], datetime(2026, 1, 1))
+        self.assertNotIn("isLunar", data)
+
+        # 农历
+        data2, _ = parse_anniversary("结婚纪念日 农历5月20", datetime(2026, 8, 23))
+        self.assertTrue(data2["isLunar"])
+        self.assertEqual(data2["lunarMonth"], 5)
+        self.assertEqual(data2["lunarDay"], 20)
+        self.assertNotIn("date", data2)
+        self.assertEqual(data2["title"], "结婚纪念日")
+        self.assertEqual(schedule_filename(data2), "lunar-5-20")
+
+        # 带年公历
+        data3, _ = parse_anniversary("领证纪念日 2026-05-20", datetime(2026, 8, 23))
+        self.assertEqual(data3["date"], datetime(2026, 5, 20))
+
+        # 无日期报错
+        data4, err4 = parse_anniversary("结婚纪念日", datetime(2026, 8, 23))
+        self.assertIsNone(data4)
+        self.assertIn("日期", err4)
+
+        # 日期非法报错
+        data5, err5 = parse_anniversary("纪念日 13月40", datetime(2026, 8, 23))
+        self.assertIsNone(data5)
+
+    def test_build_anniversary_md(self):
+        from blog_writer_core import build_schedule_md, parse_anniversary
+
+        data, _ = parse_anniversary("我和宝宝认识的纪念日 1月1日 @宝宝", datetime(2026, 8, 23))
+        md = build_schedule_md(data)
+        # 对齐博客现有 src/content/schedules/2026-01-01-我和宝宝认识的纪念日.md
+        self.assertIn('category: "anniversary"', md)
+        self.assertIn('repeat: "每年"', md)
+        self.assertIn('person: "宝宝"', md)
+        self.assertIn("date: 2026-01-01", md)
+
 
 if __name__ == "__main__":
     unittest.main()
