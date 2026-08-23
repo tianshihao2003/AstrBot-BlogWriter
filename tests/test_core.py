@@ -782,8 +782,13 @@ class TestMedia(unittest.TestCase):
         from blog_writer_core import build_bangumi_md
 
         md = build_bangumi_md(
-            "侏罗纪世界", "https://img.tsh520.cn/file/blog/bangumi/侏罗纪世界.jpg",
-            "movie", 8, ["冒险", "科幻"], "女主不该活着。", now=datetime(2026, 8, 23),
+            "侏罗纪世界",
+            "https://img.tsh520.cn/file/blog/bangumi/侏罗纪世界.jpg",
+            score=8,
+            tags=["冒险", "科幻"],
+            comment="女主不该活着。",
+            subcategory="movie",
+            now=datetime(2026, 8, 23),
         )
         # 对齐博客现有 src/content/bangumi/anime/侏罗纪世界.md 格式
         self.assertIn("title: 侏罗纪世界", md)
@@ -796,9 +801,27 @@ class TestMedia(unittest.TestCase):
         self.assertIn("published: 2026-08-23", md)
         self.assertIn("女主不该活着。", md)
         # 无评分/标签时不写字段
-        md2 = build_bangumi_md("X", "https://i/x.jpg", "tv", None, [], "", now=datetime(2026, 8, 23))
+        md2 = build_bangumi_md("X", "https://i/x.jpg", score=None, tags=[], comment="", subcategory="tv", now=datetime(2026, 8, 23))
         self.assertNotIn("score:", md2)
         self.assertNotIn("tags:", md2)
+        # 书籍：category book、无 subcategory
+        md3 = build_bangumi_md(
+            "认知觉醒", "https://img.tsh520.cn/file/blog/bangumi/认知觉醒.jpg",
+            score=9, tags=["心理"], comment="好书", category="book", now=datetime(2026, 8, 23),
+        )
+        self.assertIn("category: book", md3)
+        self.assertNotIn("subcategory", md3)
+        self.assertIn("score: 9", md3)
+
+    def test_parse_media_fields(self):
+        from blog_writer_core import parse_media_fields
+
+        self.assertEqual(parse_media_fields("名称: 我的阿勒泰"), {"title": "我的阿勒泰"})
+        self.assertEqual(parse_media_fields("类型: 剧集"), {"subcategory": "tv"})
+        self.assertEqual(parse_media_fields("类型：电影"), {"subcategory": "movie"})
+        # 普通文本/评分不是键值对
+        self.assertEqual(parse_media_fields("评分 8"), {})
+        self.assertEqual(parse_media_fields("好看"), {})
 
 
 class TestDaohang(unittest.TestCase):

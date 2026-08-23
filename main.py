@@ -97,6 +97,7 @@ try:
         parse_album_frontmatter,
         parse_anniversary,
         parse_media_score,
+        parse_media_fields,
         parse_tmdb_search_response,
         parse_xxapi_ico_response,
         parse_bill,
@@ -156,6 +157,7 @@ except ImportError:  # 兼容非包形式加载
         parse_album_frontmatter,
         parse_anniversary,
         parse_media_score,
+        parse_media_fields,
         parse_tmdb_search_response,
         parse_xxapi_ico_response,
         parse_bill,
@@ -732,6 +734,19 @@ class BlogWriter(Star):
             "发 /发布 提交，/取消 放弃。".format(icon_hint, host)
         )
 
+    def _start_book(self, event: AstrMessageEvent, user_id: str, args: List[str]):
+        """/书籍 书名 —— 封面用户自己发（无 API），评分/标签/书评同影视。"""
+        name = " ".join(args).strip()
+        if not name:
+            return event.plain_result("格式：/书籍 书名（如：/书籍 认知觉醒），随后发封面图。")
+        session = Session("book", {"title": name, "score": None, "tags": []})
+        self._sessions[user_id] = session
+        return event.plain_result(
+            "《{}》书籍会话已创建。请直接发一张封面图（必须），\n"
+            "然后可发：评分 8、#标签、书评文字（多条自动拼接），\n"
+            "发 /发布 提交，/取消 放弃。".format(name)
+        )
+
     async def _start_media(self, event: AstrMessageEvent, user_id: str, args: List[str]):
         """/影视 片名 —— TMDB 搜索取中文片名+封面（字节立即下载入会话，/发布 时上传图床独立目录）。"""
         name = " ".join(args).strip()
@@ -750,15 +765,20 @@ class BlogWriter(Star):
             return event.plain_result("TMDB 请求失败（网络不通？可在配置 tmdb_api_base 填反代地址）。")
         info, err = parse_tmdb_search_response(resp.status_code, resp.text)
         if info is None:
-            return event.plain_result("影视搜索失败：{}，请重试或发 /取消。".format(err))
+            # TMDB 搜不到 → 手动模式：等用户发封面图，名称/类型可键值对改
+            session = Session("media", {"title": name, "subcategory": "", "score": None, "tags": [], "manual": True})
+            self._sessions[user_id] = session
+            return event.plain_result(
+                "TMDB 未找到「{}」，已转手动模式：\n"
+                "请直接发一张封面图（必须），可发「名称: xxx」「类型: 剧集」修改，\n"
+                "评分发「评分 8」、标签发「#科幻」、影评直接发文字，/发布 提交。".format(name)
+            )
         # 下载封面字节（立即，避免发布时再等网络）
         poster_bytes = None
         if info["poster_path"]:
             poster_url = tmdb_poster_url(info["poster_path"], self._cfg("tmdb_image_base"))
             poster_bytes = await self._download_http(poster_url)
-        if not poster_bytes:
-            return event.plain_result("《{}》获取封面失败（TMDB 无海报或图片 CDN 不通），已中止。".format(info["title"]))
-        ext = info["poster_path"].rsplit(".", 1)[-1].lower() if "." in info["poster_path"] else "jpg"
+        ext = (info["poster_path"].rsplit(".", 1)[-1].lower() if "." in info["poster_path"] else "jpg")
         if ext not in ("jpg", "jpeg", "png", "webp"):
             ext = "jpg"
         filename = "{}.{}".format(clean_filename_part(info["title"]), ext)
@@ -769,7 +789,16 @@ class BlogWriter(Star):
             "tags": [],
             "year": info["year"],
         })
-        session.add_image(filename, poster_bytes)
+        if poster_bytes:
+            session.add_image(filename, poster_bytes)
+        else:
+            # 封面下载失败（无海报/CDN 不通）→ 同样转手动模式（保留 TMDB 信息）
+            session.meta["manual"] = True
+            self._sessions[user_id] = session
+            return event.plain_result(
+                "已找到《{}》（{}）但封面下载失败，请直接发一张封面图，"
+                "或只发评分/#标签/影评后 /发布（发图前发布会提示缺封面）。".format(info["title"], info["year"] or "未知年份")
+            )
         self._sessions[user_id] = session
         vote = info.get("vote_average")
         vote_hint = " TMDB评分{}".format(vote) if isinstance(vote, (int, float)) and vote else ""
@@ -914,6 +943,9 @@ class BlogWriter(Star):
             if cmd == "影视":
                 yield await self._start_media(event, user_id, args)
                 return
+            if cmd == "书籍":
+                yield self._start_book(event, user_id, args)
+                return
             if cmd == "导航":
                 yield await self._start_daohang(event, user_id, args)
                 return
@@ -948,11 +980,35 @@ class BlogWriter(Star):
                     yield event.plain_result("上一个会话已超时作废，请重新发指令。")
                     return
                 allow_video = session.kind == "moment"  # 视频仅动态支持；笔记/足迹/相册仍只收图片
-                if session.kind == "media":
-                    # 影视封面固定来自 TMDB，不接受用户图片
-                    if self._extract_images(event, allow_video=False):
+                if session.kind in ("media", "book"):
+                    # 影视/书籍：用户发图 = 替换/提供封面（取最后一张，多次发图以最后为准）
+                    cover_refs = self._extract_images(event, allow_video=False)
+                    if not cover_refs:
+                        raw_media = self._extract_wx_raw_media(event, allow_video=False)
+                        for enc, aes_hex, aes_b64, kind in raw_media:
+                            data = await self._download_wx_media(enc, aes_hex, aes_b64)
+                            if data is not None:
+                                cover_refs = ["wxraw_{}".format(enc[:16])]
+                                break
+                    if cover_refs:
+                        ref = cover_refs[-1]
+                        data = await self._read_image_bytes(ref)
+                        if data is None:
+                            yield event.plain_result("封面图读取失败，请重发。")
+                            return
+                        filename = ref.rsplit("/", 1)[-1].split("?")[0].split("#")[0] or "cover.jpg"
+                        if "." not in filename:
+                            filename += ".jpg"
+                        base_title = session.meta.get("title") or "cover"
+                        filename = "{}{}".format(
+                            clean_filename_part(base_title),
+                            filename[filename.rfind("."):] if "." in filename else ".jpg",
+                        )
+                        session.images.clear()
+                        session.add_image(filename, data)
+                        session.touch()
                         yield event.plain_result(
-                            "影视封面由 TMDB 自动获取，无需发图。\n评分发「评分 8」，标签发「#科幻」，影评直接发文字。"
+                            "封面已更新（发布时上传图床）。继续发评分/#标签/影评，或 /发布 提交。"
                         )
                         return
                 images = self._extract_images(event, allow_video=allow_video)
@@ -1107,8 +1163,21 @@ class BlogWriter(Star):
                         tag_hint = "，标签：{}".format(" ".join("#" + t for t in session.meta.get("tags", []))) if session.meta.get("tags") else ""
                         yield event.plain_result("已记录：{}{}。发 /发布 提交，发 /取消 放弃。".format(summary, tag_hint))
                         return
-                    elif session.kind == "media":
-                        # 影视会话：评分行 / #标签 / 其余为影评正文
+                    elif session.kind in ("media", "book"):
+                        # 影视/书籍会话：键值对（名称/类型）→ 评分行 → #标签 → 其余为正文
+                        fields = parse_media_fields(text)
+                        if fields:
+                            if fields.get("title"):
+                                session.meta["title"] = fields["title"]
+                            if fields.get("subcategory"):
+                                session.meta["subcategory"] = fields["subcategory"]
+                            session.touch()
+                            yield event.plain_result(
+                                "已修改：{}。发 /发布 提交，发 /取消 放弃。".format(
+                                    "，".join("{}={}".format(k, v) for k, v in fields.items())
+                                )
+                            )
+                            return
                         score = parse_media_score(text)
                         if score is not None:
                             session.meta["score"] = score
@@ -1329,8 +1398,8 @@ class BlogWriter(Star):
         if session.images:
             if session.kind == "album":
                 folder = album_folder
-            elif session.kind == "media":
-                # 影视封面独立目录（对齐博客图床惯例 blog/bangumi）
+            elif session.kind in ("media", "book"):
+                # 影视/书籍封面独立目录（对齐博客图床惯例 blog/bangumi）
                 folder = self._cfg("bangumi_upload_folder") or "blog/bangumi"
             elif session.kind == "daohang":
                 # 导航图标独立目录（对齐博客图床惯例 blog/daohang）
@@ -1412,18 +1481,34 @@ class BlogWriter(Star):
                 )
                 path = "src/content/daohang/{}.md".format(daohang_slug(session.meta.get("url", "")))
                 link = "/daohang"
+            elif session.kind == "book":
+                # 书籍条目：封面用户上传（必须），标准 bangumi 格式 category: book，放 book/ 根目录
+                if not image_urls:
+                    return event.plain_result("书籍缺少封面图，请先发一张封面图再 /发布（或 /取消 放弃）。")
+                book_title = str(session.meta.get("title") or "").strip()
+                md = build_bangumi_md(
+                    book_title,
+                    image_urls[0],
+                    score=session.meta.get("score"),
+                    tags=session.meta.get("tags") or [],
+                    comment=session.full_text(),
+                    category="book",
+                    now=now,
+                )
+                path = "src/content/bangumi/book/{}.md".format(clean_filename_part(book_title))
+                link = "/books"
             elif session.kind == "media":
                 # 影视条目：对齐博客现有 src/content/bangumi/anime/ 文件（封面已在上方上传）
                 if not image_urls:
-                    return event.plain_result("封面缺失，无法发布（请重新 /影视 搜索）。")
+                    return event.plain_result("封面缺失，无法发布（请发一张封面图，或 /取消 放弃）。")
                 media_title = str(session.meta.get("title") or "").strip()
                 md = build_bangumi_md(
                     media_title,
                     image_urls[0],
-                    session.meta.get("subcategory") or "movie",
-                    session.meta.get("score"),
-                    session.meta.get("tags") or [],
-                    session.full_text(),
+                    score=session.meta.get("score"),
+                    tags=session.meta.get("tags") or [],
+                    comment=session.full_text(),
+                    subcategory=session.meta.get("subcategory") or "movie",
                     now=now,
                 )
                 path = "src/content/bangumi/anime/{}.md".format(clean_filename_part(media_title))
@@ -2059,7 +2144,11 @@ class BlogWriter(Star):
             "　格式：标题 日期 @人物\n"
             "/影视 侏罗纪世界\n"
             "　封面自动从 TMDB 获取\n"
+            "　搜不到会转手动模式（自己发图）\n"
+            "　可自己发图替换封面\n"
             "　随后可发：评分 8、#标签、影评\n"
+            "/书籍 认知觉醒\n"
+            "　封面自己发一张，评分/标签/书评\n"
             "/导航 https://example.com\n"
             "　图标自动获取，随后发键值对：\n"
             "　名称/分类/描述/颜色/#标签\n"

@@ -893,6 +893,124 @@ class TestBillSchedule(unittest.TestCase):
         replies = asyncio.get_event_loop().run_until_complete(self._send("/影视 侏罗纪世界"))
         self.assertTrue(any("tmdb_api_key" in r for r in replies))
 
+    def _make_image_msg(self, name="book.png"):
+        from astrbot.api.message_components import Image
+        from pathlib import Path as _P
+        import os as _os
+
+        tmp = _P(_os.environ.get("TEMP", ".")) / ("blogwriter_" + name)
+        tmp.write_bytes(b"fake-cover-bytes")
+        return [Image(file=str(tmp))], tmp
+
+    def test_book_full_flow(self):
+        """书籍全流程：/书籍 → 发封面（必须）→ 评分/标签/书评 → 发布 bangumi/book/。"""
+        asyncio.get_event_loop().run_until_complete(self._send("/书籍 认知觉醒"))
+        sess = self.plugin._sessions.get("u1")
+        self.assertEqual(sess.kind, "book")
+        self.assertEqual(sess.meta.get("title"), "认知觉醒")
+        # 直接发布应被拦（缺封面）
+        replies = asyncio.get_event_loop().run_until_complete(self._send("/发布"))
+        self.assertFalse(any("发布成功" in r for r in replies))
+        self.assertTrue(any("封面" in r for r in replies))
+        # 发封面图
+        msgs, tmp = self._make_image_msg()
+        try:
+            replies = asyncio.get_event_loop().run_until_complete(self._send("", messages=msgs))
+            self.assertTrue(any("封面已更新" in r for r in replies))
+            self.assertEqual(len(sess.images), 1)
+            # 评分 + 标签 + 书评
+            asyncio.get_event_loop().run_until_complete(self._send("评分 9"))
+            asyncio.get_event_loop().run_until_complete(self._send("#心理 很有启发"))
+            replies = asyncio.get_event_loop().run_until_complete(self._send("/发布"))
+            self.assertTrue(any("发布成功" in r for r in replies))
+            path, md = self.plugin.committed[0]
+            self.assertEqual(path, "src/content/bangumi/book/认知觉醒.md")
+            self.assertIn("category: book", md)
+            self.assertNotIn("subcategory", md)
+            self.assertIn("score: 9", md)
+            self.assertIn("- 心理", md)
+            self.assertIn("很有启发", md)
+            self.assertEqual(self.plugin.last_upload_folder, "blog/bangumi")
+        finally:
+            tmp.unlink(missing_ok=True)
+
+    def test_media_manual_mode_when_not_found(self):
+        """TMDB 搜不到 → 手动模式：发图补封面 → 发布。"""
+        import json as _json
+
+        class FakeResp:
+            status_code = 200
+            text = _json.dumps({"results": []})
+
+        class FakeClient:
+            async def get(self, url):
+                return FakeResp()
+
+        orig_client = self.plugin._get_client
+        self.plugin._get_client = lambda: FakeClient()
+        self.plugin.config["tmdb_api_key"] = "k"
+        try:
+            replies = asyncio.get_event_loop().run_until_complete(self._send("/影视 冷门老片"))
+            self.assertTrue(any("手动模式" in r for r in replies))
+            sess = self.plugin._sessions.get("u1")
+            self.assertEqual(sess.meta.get("title"), "冷门老片")
+            # 改名称与类型
+            asyncio.get_event_loop().run_until_complete(self._send("名称: 正确片名\n类型: 剧集"))
+            self.assertEqual(sess.meta.get("title"), "正确片名")
+            self.assertEqual(sess.meta.get("subcategory"), "tv")
+            # 发封面后发布
+            msgs, tmp = self._make_image_msg("media.png")
+            try:
+                asyncio.get_event_loop().run_until_complete(self._send("", messages=msgs))
+                replies = asyncio.get_event_loop().run_until_complete(self._send("/发布"))
+                self.assertTrue(any("发布成功" in r for r in replies))
+                path, md = self.plugin.committed[0]
+                self.assertEqual(path, "src/content/bangumi/anime/正确片名.md")
+                self.assertIn("subcategory: tv", md)
+            finally:
+                tmp.unlink(missing_ok=True)
+        finally:
+            self.plugin._get_client = orig_client
+
+    def test_media_replace_cover_with_user_image(self):
+        """TMDB 命中后用户发图 → 替换封面（仍只有一张）。"""
+        import json as _json
+
+        class FakeResp:
+            status_code = 200
+            text = _json.dumps({"results": [{
+                "media_type": "movie", "title": "侏罗纪世界", "original_title": "Jurassic World",
+                "release_date": "2015-06-10", "vote_average": 6.9, "poster_path": "/abc.jpg",
+            }]})
+
+        class FakeClient:
+            async def get(self, url):
+                return FakeResp()
+
+        async def fake_download(url):
+            return b"tmdb-poster-bytes"
+
+        orig_client = self.plugin._get_client
+        orig_download = self.plugin._download_http
+        self.plugin._get_client = lambda: FakeClient()
+        self.plugin._download_http = fake_download
+        self.plugin.config["tmdb_api_key"] = "k"
+        try:
+            asyncio.get_event_loop().run_until_complete(self._send("/影视 侏罗纪世界"))
+            sess = self.plugin._sessions.get("u1")
+            self.assertEqual(len(sess.images), 1)
+            msgs, tmp = self._make_image_msg("replace.png")
+            try:
+                replies = asyncio.get_event_loop().run_until_complete(self._send("", messages=msgs))
+                self.assertTrue(any("封面已更新" in r for r in replies))
+                self.assertEqual(len(sess.images), 1)  # 替换而非追加
+                self.assertEqual(sess.images[0][1], b"fake-cover-bytes")
+            finally:
+                tmp.unlink(missing_ok=True)
+        finally:
+            self.plugin._get_client = orig_client
+            self.plugin._download_http = orig_download
+
     def test_daohang_full_flow(self):
         """导航全流程：xxapi 图标（stub）→ 键值对补信息 → 发布到 daohang/（文件名=域名 slug）。"""
         import json as _json

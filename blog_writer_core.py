@@ -21,7 +21,7 @@ def now_shanghai() -> datetime:
 SESSION_TIMEOUT = timedelta(minutes=30)
 MAX_PATH_SUFFIX = 10
 
-COMMANDS = ("动态", "笔记", "足迹", "友链", "相册", "账单", "日程", "生日", "纪念日", "影视", "导航", "提醒", "发布", "取消", "状态", "帮助")
+COMMANDS = ("动态", "笔记", "足迹", "友链", "相册", "账单", "日程", "生日", "纪念日", "影视", "书籍", "导航", "提醒", "发布", "取消", "状态", "帮助")
 
 BILL_CATEGORIES = ["餐饮", "交通", "住房", "工资", "居家生活", "交流通讯", "食品酒水", "职业收入", "人情收礼", "其他"]
 BILL_ACCOUNTS = ["微信", "支付宝", "银行卡", "现金", "其他"]
@@ -565,23 +565,26 @@ def parse_media_score(text: str) -> Optional[int]:
 def build_bangumi_md(
     title: str,
     image_url: str,
-    subcategory: str,
     score: Optional[int],
     tags: List[str],
     comment: str,
     name_cn: str = "",
+    subcategory: str = "",
+    category: str = "anime",
     now: datetime = None,
 ) -> str:
-    """生成影视条目 md，对齐博客现有 src/content/bangumi/anime/ 文件格式：
+    """生成影视/书籍条目 md，对齐博客 bangumi 格式：
     title/name_cn/category/subcategory/status/image/score/tags/published + 评论正文。
-    影视与动画同放 anime 子目录、category: anime（对齐现有数据，如 侏罗纪世界.md）。
+    影视：category=anime + subcategory(movie/tv)，放 anime/ 子目录（对齐现有数据）；
+    书籍：category=book、无 subcategory，放 book/ 根目录（手动书籍，区别于 weread 同步的分类子目录）。
     """
     now = now or now_shanghai()
     fm: Dict[str, Any] = {"title": title}
     if name_cn and name_cn != title:
         fm["name_cn"] = name_cn
-    fm["category"] = "anime"
-    fm["subcategory"] = subcategory if subcategory in ("movie", "tv") else "movie"
+    fm["category"] = category if category in ("anime", "book", "music", "game", "real") else "anime"
+    if subcategory in ("movie", "tv"):
+        fm["subcategory"] = subcategory
     fm["status"] = 2  # 看过
     fm["image"] = image_url
     if score is not None:
@@ -591,6 +594,29 @@ def build_bangumi_md(
     fm["published"] = now.strftime("%Y-%m-%d")
     body = (comment or "").strip()
     return _dump_yaml(fm) + "\n\n" + body + ("\n" if body else "")
+
+
+_MEDIA_SUBCATEGORY_KEYWORDS = {"电影": "movie", "剧集": "tv", "电视剧": "tv", "电视": "tv", "movie": "movie", "tv": "tv"}
+
+
+def parse_media_fields(text: str) -> Dict[str, str]:
+    """解析影视/书籍会话内的键值对：名称: xxx（改标题）、类型: 电影|剧集（影视 subcategory）。
+
+    返回 dict，可含 title / subcategory 键；非键值对返回空 dict。
+    """
+    result: Dict[str, str] = {}
+    for raw_line in (text or "").splitlines():
+        line = raw_line.strip()
+        m = re.match(r"^(名称|名字|标题|片名|书名)\s*[:：]\s*(.+)$", line)
+        if m:
+            result["title"] = m.group(2).strip()
+            continue
+        m2 = re.match(r"^(类型|分类名)\s*[:：]\s*(.+)$", line)
+        if m2:
+            token = m2.group(2).strip().lower()
+            if token in _MEDIA_SUBCATEGORY_KEYWORDS:
+                result["subcategory"] = _MEDIA_SUBCATEGORY_KEYWORDS[token]
+    return result
 
 
 # ---------- 导航网站（daohang）----------
