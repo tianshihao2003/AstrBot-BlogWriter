@@ -6,3 +6,6 @@ data/
 
 # ZCode 会话本地状态
 .zcode/
+
+# 本地开发工具目录
+.superpowers/
