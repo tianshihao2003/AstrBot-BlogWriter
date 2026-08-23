@@ -21,7 +21,7 @@ def now_shanghai() -> datetime:
 SESSION_TIMEOUT = timedelta(minutes=30)
 MAX_PATH_SUFFIX = 10
 
-COMMANDS = ("动态", "笔记", "足迹", "友链", "相册", "账单", "日程", "生日", "纪念日", "影视", "提醒", "发布", "取消", "状态", "帮助")
+COMMANDS = ("动态", "笔记", "足迹", "友链", "相册", "账单", "日程", "生日", "纪念日", "影视", "导航", "提醒", "发布", "取消", "状态", "帮助")
 
 BILL_CATEGORIES = ["餐饮", "交通", "住房", "工资", "居家生活", "交流通讯", "食品酒水", "职业收入", "人情收礼", "其他"]
 BILL_ACCOUNTS = ["微信", "支付宝", "银行卡", "现金", "其他"]
@@ -591,6 +591,109 @@ def build_bangumi_md(
     fm["published"] = now.strftime("%Y-%m-%d")
     body = (comment or "").strip()
     return _dump_yaml(fm) + "\n\n" + body + ("\n" if body else "")
+
+
+# ---------- 导航网站（daohang）----------
+
+XXAPI_ICO_BASE = "https://v2.xxapi.cn/api/ico"
+
+
+def build_xxapi_ico_url(site_url: str) -> str:
+    """构造 xxapi 图标获取地址（博客 scripts/添加导航/index.js 同款 API，无需 key）。"""
+    import urllib.parse
+
+    return "{}/api/ico?url={}".format(
+        XXAPI_ICO_BASE.rsplit("/api/", 1)[0], urllib.parse.quote(site_url, safe="")
+    )
+
+
+def parse_xxapi_ico_response(status: int, body: str) -> Tuple[Optional[str], str]:
+    """解析 xxapi ico 响应：{"code":200,"data":"<图标直链>"}。返回 (图标 URL, err)。"""
+    if status >= 400:
+        return None, "图标接口 HTTP {}".format(status)
+    try:
+        data = json.loads(body)
+    except ValueError:
+        return None, "图标接口响应异常"
+    if data.get("code") == 200 and data.get("data"):
+        icon_url = str(data["data"]).strip()
+        if icon_url.startswith("http"):
+            return icon_url, ""
+        return None, "图标接口返回的不是链接"
+    return None, "未获取到图标"
+
+
+def site_host(url: str) -> str:
+    """从网址提取域名：https://app.pagescms.org/x → app.pagescms.org"""
+    u = (url or "").strip()
+    m = re.match(r"^https?://([^/?#]+)", u)
+    if m:
+        return m.group(1).lower()
+    # 无 scheme：取第一个 / 前的部分
+    return u.split("/", 1)[0].lower()
+
+
+def daohang_slug(url: str) -> str:
+    """导航文件名：域名点转横线（对齐现有 app-pagescms-org.md / xxapi-cn.md 命名）。"""
+    host = site_host(url)
+    slug = host.replace(".", "-")
+    return clean_filename_part(slug, fallback="site")
+
+
+def parse_daohang_text(text: str) -> Dict[str, str]:
+    """解析导航键值对文本（会话内逐行/多行发送）。
+
+    别名：名称/名字/网站名/name/title→name；分类/类别/category→category；
+    描述/简介/介绍/description/desc→description；颜色/色彩/color→color。
+    """
+    aliases = {
+        "name": ["名称", "名字", "网站名称", "网站名", "站点名称", "站点名", "标题", "name", "title"],
+        "category": ["分类", "类别", "类目", "category"],
+        "description": ["描述", "简介", "介绍", "描述信息", "description", "desc", "descr"],
+        "color": ["颜色", "色彩", "色值", "color"],
+    }
+    result: Dict[str, str] = {}
+    for raw_line in (text or "").splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        m = re.match(r"^([^:：\s]{1,12})\s*[:：]\s*(.+)$", line)
+        if not m:
+            continue
+        key_raw = m.group(1).strip().lower()
+        value = m.group(2).strip()
+        for field, keys in aliases.items():
+            if key_raw in keys or key_raw in [k.lower() for k in keys]:
+                if value:
+                    result[field] = value
+                break
+    return result
+
+
+def build_daohang_md(
+    name: str,
+    url: str,
+    category: str,
+    icon_url: str = "",
+    description: str = "",
+    tags: Optional[List[str]] = None,
+    color: str = "",
+    body: str = "",
+) -> str:
+    """生成导航条目 md，对齐现有 src/content/daohang/ 文件格式：
+    name/url/icon/description/category/tags(行内无引号)/color(带引号)。featured/order 用户不指定不写。
+    """
+    fm: Dict[str, Any] = {"name": name, "url": url}
+    if icon_url:
+        fm["icon"] = icon_url
+    if description:
+        fm["description"] = description
+    fm["category"] = category or "未分类"
+    if tags:
+        fm["tags"] = list(tags)
+    if color:
+        fm["color"] = color
+    return _dump_yaml(fm, inline_keys={"tags"}) + "\n\n" + (body or "").strip() + ("\n" if (body or "").strip() else "")
 
 
 # ---------- 友链解析 ----------

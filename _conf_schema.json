@@ -64,6 +64,11 @@
     "type": "string",
     "default": "blog/bangumi"
   },
+  "daohang_upload_folder": {
+    "description": "导航网站图标上传图床目录（默认 blog/daohang 与博客图床惯例一致）",
+    "type": "string",
+    "default": "blog/daohang"
+  },
   "moment_tags": {
     "description": "动态默认标签",
     "type": "list",

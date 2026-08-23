@@ -790,5 +790,65 @@ class TestMedia(unittest.TestCase):
         self.assertNotIn("tags:", md2)
 
 
+class TestDaohang(unittest.TestCase):
+    def test_xxapi_ico(self):
+        from blog_writer_core import build_xxapi_ico_url, parse_xxapi_ico_response
+
+        url = build_xxapi_ico_url("https://example.com/x?a=1")
+        self.assertEqual(url, "https://v2.xxapi.cn/api/ico?url=https%3A%2F%2Fexample.com%2Fx%3Fa%3D1")
+        ok_url, err = parse_xxapi_ico_response(200, '{"code":200,"data":"https://api.iowen.cn/favicon/x.png"}')
+        self.assertEqual(err, "")
+        self.assertEqual(ok_url, "https://api.iowen.cn/favicon/x.png")
+        # 失败路径
+        icon2, err2 = parse_xxapi_ico_response(200, '{"code":404}')
+        self.assertIsNone(icon2)
+        icon3, err3 = parse_xxapi_ico_response(200, '{"code":200,"data":"/relative.png"}')
+        self.assertIsNone(icon3)
+
+    def test_host_and_slug(self):
+        from blog_writer_core import daohang_slug, site_host
+
+        self.assertEqual(site_host("https://app.pagescms.org/inbox"), "app.pagescms.org")
+        self.assertEqual(site_host("example.com/path"), "example.com")
+        # 对齐现有无编号文件命名：app-pagescms-org.md / xxapi-cn.md
+        self.assertEqual(daohang_slug("https://app.pagescms.org/"), "app-pagescms-org")
+        self.assertEqual(daohang_slug("xxapi.cn"), "xxapi-cn")
+
+    def test_parse_daohang_text(self):
+        from blog_writer_core import parse_daohang_text
+
+        kv = parse_daohang_text("名称: 团子的邮箱\n分类：我的网站\n描述: 邮箱服务\n颜色: #3b82f6")
+        self.assertEqual(kv.get("name"), "团子的邮箱")
+        self.assertEqual(kv.get("category"), "我的网站")
+        self.assertEqual(kv.get("description"), "邮箱服务")
+        self.assertEqual(kv.get("color"), "#3b82f6")
+        # 无键值对内容
+        self.assertEqual(parse_daohang_text("随便一句话"), {})
+
+    def test_build_daohang_md(self):
+        from blog_writer_core import build_daohang_md
+
+        md = build_daohang_md(
+            "团子的邮箱", "https://email.0824.uk/inbox", "我的网站",
+            "https://img.tsh520.cn/file/blog/daohang/x-icon.webp",
+            "个人使用的邮箱服务", ["个人网站", "实用工具"], "#3b82f6", body="正文",
+        )
+        # 对齐现有 src/content/daohang/01-tuanzi-email.md 格式
+        self.assertIn("name: 团子的邮箱", md)
+        self.assertIn("url: https://email.0824.uk/inbox", md)
+        self.assertIn("icon: https://img.tsh520.cn/file/blog/daohang/x-icon.webp", md)
+        self.assertIn("description: 个人使用的邮箱服务", md)
+        self.assertIn("category: 我的网站", md)
+        self.assertIn("tags: [个人网站, 实用工具]", md)
+        self.assertIn('color: "#3b82f6"', md)
+        self.assertIn("正文", md)
+        # 无图标/描述/标签/颜色时不写字段
+        md2 = build_daohang_md("X", "https://x.com", "")
+        self.assertNotIn("icon:", md2)
+        self.assertNotIn("description:", md2)
+        self.assertNotIn("tags:", md2)
+        self.assertNotIn("color:", md2)
+
+
 if __name__ == "__main__":
     unittest.main()

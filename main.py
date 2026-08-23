@@ -73,7 +73,9 @@ try:
         build_album_md,
         build_amap_url,
         build_bangumi_md,
+        build_daohang_md,
         build_tmdb_search_url,
+        build_xxapi_ico_url,
         build_bill_md,
         build_github_put_body,
         build_imgbed_upload,
@@ -96,8 +98,10 @@ try:
         parse_anniversary,
         parse_media_score,
         parse_tmdb_search_response,
+        parse_xxapi_ico_response,
         parse_bill,
         parse_bills_batch,
+        parse_daohang_text,
         parse_dynamic,
         parse_friend_text,
         parse_github_put_response,
@@ -109,6 +113,8 @@ try:
         parse_schedules_batch,
         place_filename,
         schedule_filename,
+        daohang_slug,
+        site_host,
         tmdb_poster_url,
         upload_base_host,
         upload_url_with_return_format,
@@ -126,7 +132,9 @@ except ImportError:  # 兼容非包形式加载
         build_album_md,
         build_amap_url,
         build_bangumi_md,
+        build_daohang_md,
         build_tmdb_search_url,
+        build_xxapi_ico_url,
         build_bill_md,
         build_github_put_body,
         build_imgbed_upload,
@@ -149,8 +157,10 @@ except ImportError:  # 兼容非包形式加载
         parse_anniversary,
         parse_media_score,
         parse_tmdb_search_response,
+        parse_xxapi_ico_response,
         parse_bill,
         parse_bills_batch,
+        parse_daohang_text,
         parse_dynamic,
         parse_friend_text,
         parse_github_put_response,
@@ -162,6 +172,8 @@ except ImportError:  # 兼容非包形式加载
         parse_schedules_batch,
         place_filename,
         schedule_filename,
+        daohang_slug,
+        site_host,
         tmdb_poster_url,
         upload_base_host,
         upload_url_with_return_format,
@@ -672,6 +684,54 @@ class BlogWriter(Star):
         when = "农历{}月{}".format(parsed.get("lunarMonth"), parsed.get("lunarDay")) if parsed.get("isLunar") else parsed.get("date").strftime("%Y-%m-%d")
         return event.plain_result("已识别纪念日：{}（{}，每年重复）。发 /发布 提交，发 /取消 放弃。".format(parsed.get("title"), when))
 
+    async def _start_daohang(self, event: AstrMessageEvent, user_id: str, args: List[str]):
+        """/导航 网址 —— xxapi 取网站图标（字节入会话，/发布 传图床 blog/daohang），键值对补名称/分类/描述。"""
+        url = " ".join(args).strip()
+        if not url:
+            return event.plain_result("格式：/导航 网址（如：/导航 https://example.com），图标自动获取。")
+        if not url.startswith(("http://", "https://")):
+            url = "https://" + url
+        host = site_host(url)
+        if "." not in host:
+            return event.plain_result("网址无效，请检查（如：/导航 https://example.com）。")
+        # xxapi 取图标（博客 scripts/添加导航 同款 API，无需 key）
+        icon_url = ""
+        try:
+            resp = await self._get_client().get(build_xxapi_ico_url(url))
+            icon_url, _err = parse_xxapi_ico_response(resp.status_code, resp.text)
+        except Exception as e:
+            logger.warning("BlogWriter: 图标接口请求失败: %s", e)
+        icon_bytes = None
+        if icon_url:
+            icon_bytes = await self._download_http(icon_url)
+        session = Session("daohang", {
+            "url": url,
+            "name": host,  # 默认名称=域名，可键值对改
+            "category": "未分类",
+            "description": "",
+            "color": "",
+            "tags": [],
+        })
+        if icon_bytes:
+            ext = (icon_url.rsplit(".", 1)[-1].split("?")[0].lower() or "png")
+            if ext not in ("jpg", "jpeg", "png", "webp", "gif", "ico", "svg", "bmp"):
+                ext = "png"
+            session.add_image("{}-icon.{}".format(host, ext), icon_bytes)  # 对齐现有图床命名 blog.tsh520.cn-icon.webp
+            icon_hint = "图标已就绪"
+        else:
+            icon_hint = "⚠ 图标获取失败（将无图标发布，不影响其他字段）"
+        self._sessions[user_id] = session
+        return event.plain_result(
+            "{}：{}\n\n"
+            "可继续发（键值对，可多行）：\n"
+            "名称: 自定义名称\n"
+            "分类: 我的网站\n"
+            "描述: 一句话介绍\n"
+            "颜色: #3b82f6\n"
+            "#标签\n"
+            "发 /发布 提交，/取消 放弃。".format(icon_hint, host)
+        )
+
     async def _start_media(self, event: AstrMessageEvent, user_id: str, args: List[str]):
         """/影视 片名 —— TMDB 搜索取中文片名+封面（字节立即下载入会话，/发布 时上传图床独立目录）。"""
         name = " ".join(args).strip()
@@ -854,6 +914,9 @@ class BlogWriter(Star):
             if cmd == "影视":
                 yield await self._start_media(event, user_id, args)
                 return
+            if cmd == "导航":
+                yield await self._start_daohang(event, user_id, args)
+                return
             if cmd == "提醒":
                 yield self._handle_remind(event, user_id, args)
                 return
@@ -986,6 +1049,27 @@ class BlogWriter(Star):
                             )
                         else:
                             yield event.plain_result("账单解析失败：{}，请重发。".format(err))
+                    elif session.kind == "daohang":
+                        # 导航会话：键值对（名称/分类/描述/颜色）+ #标签
+                        kv = parse_daohang_text(text)
+                        clean, tags = extract_tags(text)
+                        if kv:
+                            for k, v in kv.items():
+                                session.meta[k] = v
+                        if tags:
+                            existing = session.meta.setdefault("tags", [])
+                            for t in tags:
+                                if t not in existing:
+                                    existing.append(t)
+                        session.touch()
+                        summary = "，".join(
+                            "{}：{}".format(label, str(session.meta.get(key))[:30])
+                            for key, label in (("name", "名称"), ("category", "分类"), ("description", "描述"), ("color", "颜色"))
+                            if session.meta.get(key)
+                        )
+                        tag_hint = "，标签：{}".format(" ".join("#" + t for t in session.meta.get("tags", []))) if session.meta.get("tags") else ""
+                        yield event.plain_result("已记录：{}{}。发 /发布 提交，发 /取消 放弃。".format(summary, tag_hint))
+                        return
                     elif session.kind == "media":
                         # 影视会话：评分行 / #标签 / 其余为影评正文
                         score = parse_media_score(text)
@@ -1211,6 +1295,9 @@ class BlogWriter(Star):
             elif session.kind == "media":
                 # 影视封面独立目录（对齐博客图床惯例 blog/bangumi）
                 folder = self._cfg("bangumi_upload_folder") or "blog/bangumi"
+            elif session.kind == "daohang":
+                # 导航图标独立目录（对齐博客图床惯例 blog/daohang）
+                folder = self._cfg("daohang_upload_folder") or "blog/daohang"
             else:
                 # 博客图床目录已统一（2026-08-13）：插件上传的图片全部进 imgbed_upload_folder（默认 blog/moments）
                 folder = self._cfg("imgbed_upload_folder") or "blog/moments"
@@ -1273,6 +1360,21 @@ class BlogWriter(Star):
                 md = build_album_md(album_name, album_folder, now)
                 path = "src/content/album/{}.md".format(clean_name)
                 link = "/album/{}".format(clean_name)
+            elif session.kind == "daohang":
+                # 导航条目：图标已在上方上传（无图标时 image 留空，schema optional）
+                icon_url = image_urls[0] if image_urls else ""
+                md = build_daohang_md(
+                    session.meta.get("name", ""),
+                    session.meta.get("url", ""),
+                    session.meta.get("category", "未分类"),
+                    icon_url,
+                    session.meta.get("description", ""),
+                    session.meta.get("tags") or [],
+                    session.meta.get("color", ""),
+                    body=session.full_text(),
+                )
+                path = "src/content/daohang/{}.md".format(daohang_slug(session.meta.get("url", "")))
+                link = "/daohang"
             elif session.kind == "media":
                 # 影视条目：对齐博客现有 src/content/bangumi/anime/ 文件（封面已在上方上传）
                 if not image_urls:
@@ -1921,6 +2023,9 @@ class BlogWriter(Star):
             "/影视 侏罗纪世界\n"
             "　封面自动从 TMDB 获取\n"
             "　随后可发：评分 8、#标签、影评\n"
+            "/导航 https://example.com\n"
+            "　图标自动获取，随后发键值对：\n"
+            "　名称/分类/描述/颜色/#标签\n"
             "\n"
             "———— 🔧 管会话 ————\n"
             "/发布　提交当前会话\n"
