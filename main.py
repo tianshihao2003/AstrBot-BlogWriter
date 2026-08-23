@@ -512,13 +512,17 @@ class BlogWriter(Star):
 
     # ---------- 会话创建（账单/日程/提醒） ----------
 
+    _BILL_TYPE_LABELS = {"expense": "支出", "income": "收入", "liability": "负债", "transfer": "转账"}
+
     def _apply_bill_defaults(self, item: Dict) -> None:
-        """正则解析出的账单项应用配置默认值（账户/分类为「其他」时替换）。"""
-        if item.get("account") == "其他":
+        """正则解析出的账单项应用配置默认值（账户/分类为「其他」时替换）。
+
+        负债不套默认账户（负债常挂在花呗/白条等信用账户，默认「微信」不对）。"""
+        if item.get("account") == "其他" and item.get("type") != "liability":
             default_acc = self._cfg("bill_default_account", "其他")
             if default_acc in BILL_ACCOUNTS:
                 item["account"] = default_acc
-        if item.get("category") == "其他":
+        if item.get("category") == "其他" and item.get("type") != "liability":
             default_cat = self._cfg("bill_default_category", "其他")
             if default_cat in BILL_CATEGORIES:
                 item["category"] = default_cat
@@ -527,7 +531,13 @@ class BlogWriter(Star):
         text = " ".join(args).strip()
         if not text:
             self._sessions[user_id] = Session("bill", {})
-            return event.plain_result("账单会话已创建，请发送账单内容（如：今天午餐微信花了32），发 /发布 提交，发 /取消 放弃。")
+            return event.plain_result(
+                "账单会话已创建，请发送账单内容，发 /发布 提交，发 /取消 放弃。\n"
+                "支出：今天午餐微信花了32（或首词「支出」显式指定）\n"
+                "收入：发工资12000 银行卡（或首词「收入」）\n"
+                "负债：花呗借款5000 / 花呗还款2000（借入为正、还款为负；或首词「负债」）\n"
+                "批量：午餐30晚餐45打车12"
+            )
         # 批量正则（一句含多个金额，如“午餐30晚餐45打车12”）
         try:
             batch, _ = parse_bills_batch(text)
@@ -547,8 +557,12 @@ class BlogWriter(Star):
         self._apply_bill_defaults(parsed)
         self._sessions[user_id] = Session("bill", parsed)
         return event.plain_result(
-            "已识别账单：{} 金额{}，分类{}，账户{}。发 /发布 提交，发 /取消 放弃。".format(
-                parsed.get("title"), parsed.get("amount"), parsed.get("category"), parsed.get("account")
+            "已识别账单：{} 金额{}（{}），分类{}，账户{}。发 /发布 提交，发 /取消 放弃。".format(
+                parsed.get("title"),
+                parsed.get("amount"),
+                self._BILL_TYPE_LABELS.get(parsed.get("type"), parsed.get("type")),
+                parsed.get("category"),
+                parsed.get("account"),
             )
         )
 
@@ -1774,7 +1788,7 @@ class BlogWriter(Star):
             "/足迹 省 地点 体验 #标签 —— 发足迹，坐标自动获取\n"
             "/友链 —— 发友链（站点名称/描述/链接/头像链接，逐行发送自动识别）\n"
             "/相册 相册名 —— 发相册照片（随后直接发图，多张可多次发送）\n"
-            "/账单 内容 —— 记账（自然语言正则解析，如：今天午餐微信花了32；支持一句多笔）\n"
+            "/账单 内容 —— 记账（自然语言正则解析；首词可显式指定类型：支出/收入/负债，如：/账单 支出 午餐30、/账单 负债 花呗借款5000；负债借入为正、还款为负；支持一句多笔）\n"
             "/日程 内容 —— 建日程（自然语言正则解析，如：明天下午3点在会议室A开周会 每周 提前15分钟）\n"
             "/生日 内容 —— 添加生日（如：我的农历8.24；支持一句多个：我的农历8.24对象12.22妈8.7都是农历）\n"
             "/纪念日 内容 —— 添加纪念日（标题 日期 [@人物]，如：结婚纪念日 农历5月20，每年重复）\n"

@@ -788,6 +788,30 @@ class TestBillSchedule(unittest.TestCase):
         # 全天生日不调度提醒
         self.assertEqual(len(self.plugin.scheduled), 0)
 
+    def test_start_bill_liability_and_publish(self):
+        # /账单 负债 前缀 + 借入为正；发布后 md 对齐博客负债格式（type liability、tags 负债）
+        replies = asyncio.get_event_loop().run_until_complete(self._send("/账单 负债 花呗借款5000"))
+        self.assertTrue(any("已识别" in r for r in replies))
+        sess = self.plugin._sessions.get("u1")
+        self.assertEqual(sess.meta.get("type"), "liability")
+        self.assertEqual(sess.meta.get("amount"), 5000)
+        self.assertEqual(sess.meta.get("account"), "花呗")
+        replies = asyncio.get_event_loop().run_until_complete(self._send("/发布"))
+        self.assertTrue(any("发布成功" in r for r in replies))
+        path, md = self.plugin.committed[0]
+        self.assertTrue(path.startswith("src/content/bills/"))
+        self.assertIn('type: "liability"', md)
+        self.assertIn("amount: 5000", md)
+        self.assertIn('category: "负债"', md)
+        self.assertIn('tags: ["负债"]', md)
+
+    def test_start_bill_liability_repay_keyword(self):
+        # 自然语言「还款」→ 负数负债
+        replies = asyncio.get_event_loop().run_until_complete(self._send("/账单 花呗还款2000"))
+        sess = self.plugin._sessions.get("u1")
+        self.assertEqual(sess.meta.get("type"), "liability")
+        self.assertEqual(sess.meta.get("amount"), -2000)
+
     def test_remind_command(self):
         replies = asyncio.get_event_loop().run_until_complete(self._send("/提醒"))
         self.assertTrue(any("提醒" in r for r in replies))

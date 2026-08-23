@@ -547,6 +547,45 @@ class TestBillSchedule(unittest.TestCase):
         self.assertEqual(data["type"], "income")
         self.assertEqual(data["amount"], 12000)
 
+    def test_parse_bill_liability_borrow(self):
+        # 负债借入：正数（对齐博客 bill-adapter：liability += amount）
+        data, err = parse_bill("花呗借款5000")
+        self.assertEqual(err, "")
+        self.assertEqual(data["type"], "liability")
+        self.assertEqual(data["amount"], 5000)
+        self.assertEqual(data["category"], "负债")
+        self.assertEqual(data["account"], "花呗")
+
+    def test_parse_bill_liability_repay(self):
+        # 负债还款：负数（减少负债）
+        data, _ = parse_bill("花呗还款2000")
+        self.assertEqual(data["type"], "liability")
+        self.assertEqual(data["amount"], -2000)
+        self.assertEqual(data["account"], "花呗")
+
+    def test_parse_bill_type_prefix(self):
+        # 首词显式类型前缀
+        data, _ = parse_bill("支出 午餐微信花了32")
+        self.assertEqual(data["type"], "expense")
+        self.assertEqual(data["amount"], -32)
+        data2, _ = parse_bill("收入 兼职到手800 支付宝")
+        self.assertEqual(data2["type"], "income")
+        self.assertEqual(data2["amount"], 800)
+        data3, _ = parse_bill("负债 白条借款300")
+        self.assertEqual(data3["type"], "liability")
+        self.assertEqual(data3["amount"], 300)
+        self.assertEqual(data3["account"], "白条")
+        # 前缀 + 还款 → 负
+        data4, _ = parse_bill("负债 花呗还款2000")
+        self.assertEqual(data4["type"], "liability")
+        self.assertEqual(data4["amount"], -2000)
+
+    def test_parse_bill_prefix_word_alone_not_stripped(self):
+        # 「消费」后无空格内容时（如「消费30」），不作为前缀剥离，按关键词正常解析
+        data, _ = parse_bill("消费30")
+        self.assertEqual(data["type"], "expense")
+        self.assertEqual(data["amount"], -30)
+
     def test_build_bill_md(self):
         md = build_bill_md(
             {
