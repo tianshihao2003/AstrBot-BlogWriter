@@ -24,6 +24,7 @@
 - ✅ 友链字段智能识别：兼容中英文键名（站点名称/名称/name/博客名…）、冒号/单空格分隔、乱序、缺字段提示；`weight: 0` + `group: other` 对齐现有文件
 - ✅ 会话式图片收集：微信图片不能图文同发，先发命令再发图，`/发布` 统一提交
 - ✅ 文件名自动冲突处理：同日多条自动追加 `-1`、`-2` 后缀
+- ✅ **影视记录**（2026-08-23）：`/影视 侏罗纪世界` 自动从 TMDB（themoviedb.org）搜索中文片名并获取封面，封面上传图床独立目录（默认 `blog/bangumi`）；随后可发 `评分 8`、`#标签`、一句话影评，生成 `src/content/bangumi/anime/片名.md`（category: anime + subcategory: movie/tv，对齐博客现有影视条目格式）；TMDB 连不上可在配置填反代地址
 - ✅ 白名单控制：非白名单用户静默忽略，绝不抢占其他插件/AI 的消息处理
 - ✅ 微信图片下载兜底：适配器 aiohttp 被微信 CDN TLS 风控拒绝时，自动改用 curl 下载 + AES 解密
 
@@ -48,6 +49,9 @@
 | album_folder_prefix | 相册图片目录前缀，默认 `blog/album`（实际目录 = 前缀 + 相册名） |
 | wx_cdn_base_url | 微信媒体 CDN 地址（图片下载兜底用），默认 `https://novac2c.cdn.weixin.qq.com/c2c` |
 | amap_key | 高德 Web 服务 Key（足迹坐标用）；留空读环境变量 `AMAP_KEY` |
+| tmdb_api_key | TMDB API Key（影视封面用）；themoviedb.org 免费注册申请 v3 Key |
+| tmdb_api_base / tmdb_image_base | TMDB API/图片地址（服务器连不上官方时填自建反代；默认官方地址） |
+| bangumi_upload_folder | 影视封面上传图床目录（独立于动态图片目录），默认 `blog/bangumi` |
 | moment_tags / place_tags | 动态/足迹默认标签，默认 `["日常"]` / `["旅游"]` |
 | default_note_dir | 笔记默认分类目录，默认 `日常随笔` |
 | friend_default_avatar | 友链默认头像（未提供头像链接时），默认 `/assets/ziyuan/tx.webp` |
@@ -71,6 +75,7 @@
 | `/日程 明天15点开周会 @会议室A 高优 每周 提前15分钟` / `/日程` | 普通日程（category: schedule），到点微信提醒 |
 | `/生日 我的农历8.24` / `/生日` | 生日（category: birthday，每年重复全天）；一句多个：`/生日 我的农历8.24对象12.22妈8.7都是农历`；农历文件名 `lunar-M-D` |
 | `/纪念日 结婚纪念日 农历5月20` / `/纪念日` | 纪念日（category: anniversary，每年重复全天），格式 `标题 日期 [@人物]`，日期支持 `1月1日` / `2026-01-01` / `农历5月20` |
+| `/影视 侏罗纪世界` | 影视记录：TMDB 自动搜片取封面（上传图床 `blog/bangumi`），随后可发 `评分 8`、`#标签`、影评，`/发布` 生成 bangumi 条目 |
 | `/提醒 列表` / `/提醒 取消 标题` | 查看/取消待提醒日程 |
 | `/发布` | 结束会话：上传图床 → 生成 markdown → GitHub 提交 |
 | `/取消` | 放弃当前会话 |
@@ -112,7 +117,7 @@ pip install httpx pycryptodome
 python -m unittest discover -s tests
 ```
 
-122 个单元测试 + 集成冒烟测试（stub astrbot 依赖），覆盖命令解析、markdown 生成（含 YAML 边界：时间不加引号、纯数字标签加引号、2026-08 新格式引号/行内数组）、图床/高德/GitHub 响应解析、友链字段识别、账单三类型正则解析（含负债借入/还款/显式前缀/批量）、日程/生日/纪念日解析（含农历与防呆拦截）、消息权限与放行逻辑。
+128 个单元测试 + 集成冒烟测试（stub astrbot 依赖），覆盖命令解析、markdown 生成（含 YAML 边界与 2026-08 新格式）、图床/高德/GitHub/TMDB 响应解析、友链字段识别、账单三类型、日程/生日/纪念日解析（含农历与防呆）、影视全流程、消息权限与放行逻辑。
 
 ## 致谢
 

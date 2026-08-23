@@ -21,7 +21,7 @@ def now_shanghai() -> datetime:
 SESSION_TIMEOUT = timedelta(minutes=30)
 MAX_PATH_SUFFIX = 10
 
-COMMANDS = ("动态", "笔记", "足迹", "友链", "相册", "账单", "日程", "生日", "纪念日", "提醒", "发布", "取消", "状态", "帮助")
+COMMANDS = ("动态", "笔记", "足迹", "友链", "相册", "账单", "日程", "生日", "纪念日", "影视", "提醒", "发布", "取消", "状态", "帮助")
 
 BILL_CATEGORIES = ["餐饮", "交通", "住房", "工资", "居家生活", "交流通讯", "食品酒水", "职业收入", "人情收礼", "其他"]
 BILL_ACCOUNTS = ["微信", "支付宝", "银行卡", "现金", "其他"]
@@ -482,6 +482,115 @@ def parse_amap_response(status: int, body: str) -> Tuple[bool, Tuple[float, floa
     except ValueError:
         return False, None
     return True, (lat, lng)
+
+
+# ---------- TMDB 影视 ----------
+
+TMDB_API_BASE_DEFAULT = "https://api.themoviedb.org"
+TMDB_IMAGE_BASE_DEFAULT = "https://image.tmdb.org/t/p"
+
+
+def build_tmdb_search_url(query: str, api_key: str, api_base: str = "") -> str:
+    """构造 TMDB /search/multi 搜索地址（电影+剧集一起搜，中文 zh-CN）。"""
+    import urllib.parse
+
+    base = (api_base or TMDB_API_BASE_DEFAULT).strip().rstrip("/")
+    return "{}/3/search/multi?api_key={}&query={}&language=zh-CN&include_adult=false".format(
+        base, urllib.parse.quote(api_key), urllib.parse.quote(query)
+    )
+
+
+def tmdb_poster_url(poster_path: str, image_base: str = "", size: str = "w500") -> str:
+    """海报完整 URL：image_base 默认 https://image.tmdb.org/t/p，尺寸 w500。"""
+    base = (image_base or TMDB_IMAGE_BASE_DEFAULT).strip().rstrip("/")
+    path = (poster_path or "").strip()
+    if not path.startswith("/"):
+        path = "/" + path
+    return "{}/{}/{}".format(base, size, path.lstrip("/")) if path != "/" else ""
+
+
+def parse_tmdb_search_response(status: int, body: str) -> Tuple[Optional[Dict], str]:
+    """解析 TMDB /search/multi 响应，取第一个 movie/tv 条目（跳过 person 等）。
+
+    返回 (data, err)。data：
+      media_type(movie/tv)、title(中文名，无则原名)、original_title、year、
+      overview(截断)、vote_average、poster_path
+    subcategory 映射：movie→movie、tv→tv。
+    """
+    if status == 401:
+        return None, "TMDB 认证失败（HTTP 401）：请检查 tmdb_api_key"
+    if status >= 400:
+        return None, "TMDB 返回 HTTP {}".format(status)
+    try:
+        data = json.loads(body)
+    except ValueError:
+        return None, "TMDB 响应不是 JSON：{}".format((body or "")[:120])
+    for item in data.get("results") or []:
+        if not isinstance(item, dict):
+            continue
+        media_type = str(item.get("media_type") or "")
+        if media_type not in ("movie", "tv"):
+            continue
+        title = str(item.get("title") or item.get("name") or "").strip()
+        original = str(item.get("original_title") or item.get("original_name") or "").strip()
+        date_str = str(item.get("release_date") or item.get("first_air_date") or "").strip()
+        if not title and not original:
+            continue
+        return {
+            "media_type": media_type,
+            "title": title or original,
+            "original_title": original,
+            "year": date_str[:4],
+            "overview": str(item.get("overview") or "").strip()[:60],
+            "vote_average": item.get("vote_average"),
+            "poster_path": str(item.get("poster_path") or "").strip(),
+        }, ""
+    return None, "TMDB 未找到该片（换个片名试试，或检查网络）"
+
+
+def parse_media_score(text: str) -> Optional[int]:
+    """解析会话内评分行：评分 8 / 打分 9 / 8分 / 十分制 8.5 → int(0-10)。非评分行返回 None。"""
+    m = re.match(r"^(?:评分|打分|分数|得分)\s*[:：]?\s*(\d{1,2})(?:\.\d)?\s*(?:分|片|星)?\s*$", (text or "").strip())
+    if not m:
+        m = re.match(r"^(\d{1,2})(?:\.\d)?\s*分\s*$", (text or "").strip())
+    if not m:
+        return None
+    try:
+        score = int(m.group(1))
+    except ValueError:
+        return None
+    return max(0, min(10, score))
+
+
+def build_bangumi_md(
+    title: str,
+    image_url: str,
+    subcategory: str,
+    score: Optional[int],
+    tags: List[str],
+    comment: str,
+    name_cn: str = "",
+    now: datetime = None,
+) -> str:
+    """生成影视条目 md，对齐博客现有 src/content/bangumi/anime/ 文件格式：
+    title/name_cn/category/subcategory/status/image/score/tags/published + 评论正文。
+    影视与动画同放 anime 子目录、category: anime（对齐现有数据，如 侏罗纪世界.md）。
+    """
+    now = now or now_shanghai()
+    fm: Dict[str, Any] = {"title": title}
+    if name_cn and name_cn != title:
+        fm["name_cn"] = name_cn
+    fm["category"] = "anime"
+    fm["subcategory"] = subcategory if subcategory in ("movie", "tv") else "movie"
+    fm["status"] = 2  # 看过
+    fm["image"] = image_url
+    if score is not None:
+        fm["score"] = score
+    if tags:
+        fm["tags"] = tags
+    fm["published"] = now.strftime("%Y-%m-%d")
+    body = (comment or "").strip()
+    return _dump_yaml(fm) + "\n\n" + body + ("\n" if body else "")
 
 
 # ---------- 友链解析 ----------

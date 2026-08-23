@@ -710,5 +710,85 @@ class TestBillSchedule(unittest.TestCase):
         self.assertIn("date: 2026-01-01", md)
 
 
+class TestMedia(unittest.TestCase):
+    def test_tmdb_search_url_and_poster(self):
+        from blog_writer_core import build_tmdb_search_url, tmdb_poster_url
+
+        url = build_tmdb_search_url("侏罗纪世界", "mykey")
+        self.assertIn("api_key=mykey", url)
+        self.assertIn("language=zh-CN", url)
+        # 自定义反代 base
+        url2 = build_tmdb_search_url("x", "k", "https://tmdb-proxy.example.com/")
+        self.assertTrue(url2.startswith("https://tmdb-proxy.example.com/3/search/multi"))
+        self.assertEqual(
+            tmdb_poster_url("/abc.jpg"),
+            "https://image.tmdb.org/t/p/w500/abc.jpg",
+        )
+        self.assertEqual(
+            tmdb_poster_url("abc.jpg", "https://img-proxy.example.com/t/p/"),
+            "https://img-proxy.example.com/t/p/w500/abc.jpg",
+        )
+
+    def test_parse_tmdb_search_response(self):
+        from blog_writer_core import parse_tmdb_search_response
+        import json
+
+        body = json.dumps({
+            "results": [
+                {"media_type": "person", "name": "导演"},
+                {
+                    "media_type": "tv", "name": "测试剧", "original_name": "Test Show",
+                    "first_air_date": "2024-03-01", "overview": "剧情简介", "vote_average": 8.1,
+                    "poster_path": "/tv.jpg",
+                },
+            ]
+        }, ensure_ascii=False)
+        data, err = parse_tmdb_search_response(200, body)
+        self.assertEqual(err, "")
+        self.assertEqual(data["media_type"], "tv")
+        self.assertEqual(data["title"], "测试剧")
+        self.assertEqual(data["year"], "2024")
+        # 未找到
+        data2, err2 = parse_tmdb_search_response(200, json.dumps({"results": []}))
+        self.assertIsNone(data2)
+        self.assertIn("未找到", err2)
+        # 401
+        data3, err3 = parse_tmdb_search_response(401, "{}")
+        self.assertIsNone(data3)
+        self.assertIn("401", err3)
+
+    def test_parse_media_score(self):
+        from blog_writer_core import parse_media_score
+
+        self.assertEqual(parse_media_score("评分 8"), 8)
+        self.assertEqual(parse_media_score("打分：9"), 9)
+        self.assertEqual(parse_media_score("10分"), 10)
+        self.assertEqual(parse_media_score("99分"), 10)  # clamp 到 10
+        self.assertIsNone(parse_media_score("好看"))
+        self.assertIsNone(parse_media_score("评分"))  # 无数字不算
+
+    def test_build_bangumi_md(self):
+        from blog_writer_core import build_bangumi_md
+
+        md = build_bangumi_md(
+            "侏罗纪世界", "https://img.tsh520.cn/file/blog/bangumi/侏罗纪世界.jpg",
+            "movie", 8, ["冒险", "科幻"], "女主不该活着。", now=datetime(2026, 8, 23),
+        )
+        # 对齐博客现有 src/content/bangumi/anime/侏罗纪世界.md 格式
+        self.assertIn("title: 侏罗纪世界", md)
+        self.assertIn("category: anime", md)
+        self.assertIn("subcategory: movie", md)
+        self.assertIn("status: 2", md)
+        self.assertIn("image: https://img.tsh520.cn/file/blog/bangumi/侏罗纪世界.jpg", md)
+        self.assertIn("score: 8", md)
+        self.assertIn("- 冒险", md)
+        self.assertIn("published: 2026-08-23", md)
+        self.assertIn("女主不该活着。", md)
+        # 无评分/标签时不写字段
+        md2 = build_bangumi_md("X", "https://i/x.jpg", "tv", None, [], "", now=datetime(2026, 8, 23))
+        self.assertNotIn("score:", md2)
+        self.assertNotIn("tags:", md2)
+
+
 if __name__ == "__main__":
     unittest.main()

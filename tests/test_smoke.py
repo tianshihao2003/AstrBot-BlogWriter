@@ -816,6 +816,68 @@ class TestBillSchedule(unittest.TestCase):
         replies = asyncio.get_event_loop().run_until_complete(self._send("/提醒"))
         self.assertTrue(any("提醒" in r for r in replies))
 
+    def test_media_full_flow(self):
+        """影视全流程：TMDB 搜索（stub）→ 评分/标签/影评 → 发布到 bangumi/anime/。"""
+        import json as _json
+
+        class FakeResp:
+            status_code = 200
+            text = _json.dumps(
+                {"results": [{
+                    "media_type": "movie", "title": "侏罗纪世界", "original_title": "Jurassic World",
+                    "release_date": "2015-06-10", "overview": "恐龙主题公园",
+                    "vote_average": 6.9, "poster_path": "/abc123.jpg",
+                }]},
+                ensure_ascii=False,
+            )
+
+        class FakeClient:
+            async def get(self, url):
+                return FakeResp()
+
+        async def fake_download(url):
+            return b"fake-poster-bytes"
+
+        orig_client = self.plugin._get_client
+        orig_download = self.plugin._download_http
+        self.plugin._get_client = lambda: FakeClient()
+        self.plugin._download_http = fake_download
+        self.plugin.config["tmdb_api_key"] = "test-key"
+        try:
+            replies = asyncio.get_event_loop().run_until_complete(self._send("/影视 侏罗纪世界"))
+            self.assertTrue(any("已找到《侏罗纪世界》" in r for r in replies))
+            sess = self.plugin._sessions.get("u1")
+            self.assertEqual(sess.kind, "media")
+            self.assertEqual(sess.meta.get("subcategory"), "movie")
+            self.assertEqual(len(sess.images), 1)  # 封面字节已入会话
+            # 评分
+            replies = asyncio.get_event_loop().run_until_complete(self._send("评分 8"))
+            self.assertTrue(any("评分：8" in r for r in replies))
+            # 标签 + 影评
+            replies = asyncio.get_event_loop().run_until_complete(self._send("#科幻 好看"))
+            self.assertEqual(sess.meta.get("tags"), ["科幻"])
+            # 发布
+            replies = asyncio.get_event_loop().run_until_complete(self._send("/发布"))
+            self.assertTrue(any("发布成功" in r for r in replies))
+            path, md = self.plugin.committed[0]
+            self.assertEqual(path, "src/content/bangumi/anime/侏罗纪世界.md")
+            self.assertIn("category: anime", md)
+            self.assertIn("subcategory: movie", md)
+            self.assertIn("score: 8", md)
+            self.assertIn("- 科幻", md)
+            self.assertIn("image: https://img.tsh520.cn/file/侏罗纪世界.jpg", md)
+            self.assertIn("好看", md)
+            # 封面上传到独立目录
+            self.assertEqual(self.plugin.last_upload_folder, "blog/bangumi")
+        finally:
+            self.plugin._get_client = orig_client
+            self.plugin._download_http = orig_download
+
+    def test_media_no_key_hint(self):
+        self.plugin.config["tmdb_api_key"] = ""
+        replies = asyncio.get_event_loop().run_until_complete(self._send("/影视 侏罗纪世界"))
+        self.assertTrue(any("tmdb_api_key" in r for r in replies))
+
     def test_start_birthday_single(self):
         replies = asyncio.get_event_loop().run_until_complete(self._send("/生日 我的生日农历8.24"))
         self.assertTrue(any("已识别生日" in r for r in replies))

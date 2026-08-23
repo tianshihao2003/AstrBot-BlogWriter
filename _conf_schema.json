@@ -44,6 +44,26 @@
     "type": "string",
     "default": ""
   },
+  "tmdb_api_key": {
+    "description": "TMDB API Key（影视封面用；themoviedb.org 免费注册申请 v3 Key）",
+    "type": "string",
+    "default": ""
+  },
+  "tmdb_api_base": {
+    "description": "TMDB API 地址（服务器连不上官方时填自建反代，默认 https://api.themoviedb.org）",
+    "type": "string",
+    "default": "https://api.themoviedb.org"
+  },
+  "tmdb_image_base": {
+    "description": "TMDB 图片 CDN 地址（默认 https://image.tmdb.org/t/p，连不上可与 API 一并换反代）",
+    "type": "string",
+    "default": "https://image.tmdb.org/t/p"
+  },
+  "bangumi_upload_folder": {
+    "description": "影视封面上传图床目录（独立于动态图片目录，默认 blog/bangumi 与博客图床惯例一致）",
+    "type": "string",
+    "default": "blog/bangumi"
+  },
   "moment_tags": {
     "description": "动态默认标签",
     "type": "list",

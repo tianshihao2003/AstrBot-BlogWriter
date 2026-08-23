@@ -72,6 +72,8 @@ try:
         SESSION_TIMEOUT,
         build_album_md,
         build_amap_url,
+        build_bangumi_md,
+        build_tmdb_search_url,
         build_bill_md,
         build_github_put_body,
         build_imgbed_upload,
@@ -92,6 +94,8 @@ try:
         parse_album,
         parse_album_frontmatter,
         parse_anniversary,
+        parse_media_score,
+        parse_tmdb_search_response,
         parse_bill,
         parse_bills_batch,
         parse_dynamic,
@@ -105,6 +109,7 @@ try:
         parse_schedules_batch,
         place_filename,
         schedule_filename,
+        tmdb_poster_url,
         upload_base_host,
         upload_url_with_return_format,
         validate_friend_data,
@@ -120,6 +125,8 @@ except ImportError:  # 兼容非包形式加载
         SESSION_TIMEOUT,
         build_album_md,
         build_amap_url,
+        build_bangumi_md,
+        build_tmdb_search_url,
         build_bill_md,
         build_github_put_body,
         build_imgbed_upload,
@@ -140,6 +147,8 @@ except ImportError:  # 兼容非包形式加载
         parse_album,
         parse_album_frontmatter,
         parse_anniversary,
+        parse_media_score,
+        parse_tmdb_search_response,
         parse_bill,
         parse_bills_batch,
         parse_dynamic,
@@ -153,6 +162,7 @@ except ImportError:  # 兼容非包形式加载
         parse_schedules_batch,
         place_filename,
         schedule_filename,
+        tmdb_poster_url,
         upload_base_host,
         upload_url_with_return_format,
         validate_friend_data,
@@ -662,6 +672,57 @@ class BlogWriter(Star):
         when = "农历{}月{}".format(parsed.get("lunarMonth"), parsed.get("lunarDay")) if parsed.get("isLunar") else parsed.get("date").strftime("%Y-%m-%d")
         return event.plain_result("已识别纪念日：{}（{}，每年重复）。发 /发布 提交，发 /取消 放弃。".format(parsed.get("title"), when))
 
+    async def _start_media(self, event: AstrMessageEvent, user_id: str, args: List[str]):
+        """/影视 片名 —— TMDB 搜索取中文片名+封面（字节立即下载入会话，/发布 时上传图床独立目录）。"""
+        name = " ".join(args).strip()
+        if not name:
+            return event.plain_result("格式：/影视 片名（如：/影视 侏罗纪世界），封面自动从 TMDB 获取。")
+        api_key = (self._cfg("tmdb_api_key") or "").strip()
+        if not api_key:
+            return event.plain_result(
+                "未配置 tmdb_api_key。请到 themoviedb.org 免费注册 → 设置 → API 申请 v3 Key，填到插件配置。"
+            )
+        url = build_tmdb_search_url(name, api_key, self._cfg("tmdb_api_base"))
+        try:
+            resp = await self._get_client().get(url)
+        except Exception as e:
+            logger.warning("BlogWriter: TMDB 请求失败: %s", e)
+            return event.plain_result("TMDB 请求失败（网络不通？可在配置 tmdb_api_base 填反代地址）。")
+        info, err = parse_tmdb_search_response(resp.status_code, resp.text)
+        if info is None:
+            return event.plain_result("影视搜索失败：{}，请重试或发 /取消。".format(err))
+        # 下载封面字节（立即，避免发布时再等网络）
+        poster_bytes = None
+        if info["poster_path"]:
+            poster_url = tmdb_poster_url(info["poster_path"], self._cfg("tmdb_image_base"))
+            poster_bytes = await self._download_http(poster_url)
+        if not poster_bytes:
+            return event.plain_result("《{}》获取封面失败（TMDB 无海报或图片 CDN 不通），已中止。".format(info["title"]))
+        ext = info["poster_path"].rsplit(".", 1)[-1].lower() if "." in info["poster_path"] else "jpg"
+        if ext not in ("jpg", "jpeg", "png", "webp"):
+            ext = "jpg"
+        filename = "{}.{}".format(clean_filename_part(info["title"]), ext)
+        session = Session("media", {
+            "title": info["title"],
+            "subcategory": "movie" if info["media_type"] == "movie" else "tv",
+            "score": None,
+            "tags": [],
+            "year": info["year"],
+        })
+        session.add_image(filename, poster_bytes)
+        self._sessions[user_id] = session
+        vote = info.get("vote_average")
+        vote_hint = " TMDB评分{}".format(vote) if isinstance(vote, (int, float)) and vote else ""
+        sub_label = "电影" if info["media_type"] == "movie" else "剧集"
+        return event.plain_result(
+            "已找到《{}》（{} {}）{}，封面已就绪。\n\n"
+            "接下来可发：\n"
+            "评分 8　→ 打分（0-10）\n"
+            "#科幻 #冒险　→ 标签\n"
+            "直接发文字　→ 一句话影评\n"
+            "发 /发布 提交，/取消 放弃。".format(info["title"], info["year"] or "未知年份", sub_label, vote_hint)
+        )
+
     def _handle_remind(self, event: AstrMessageEvent, user_id: str, args: List[str]):
         text = " ".join(args).strip().lower()
         # 取消
@@ -790,6 +851,9 @@ class BlogWriter(Star):
             if cmd == "纪念日":
                 yield await self._start_anniversary(event, user_id, args, raw)
                 return
+            if cmd == "影视":
+                yield await self._start_media(event, user_id, args)
+                return
             if cmd == "提醒":
                 yield self._handle_remind(event, user_id, args)
                 return
@@ -821,6 +885,13 @@ class BlogWriter(Star):
                     yield event.plain_result("上一个会话已超时作废，请重新发指令。")
                     return
                 allow_video = session.kind == "moment"  # 视频仅动态支持；笔记/足迹/相册仍只收图片
+                if session.kind == "media":
+                    # 影视封面固定来自 TMDB，不接受用户图片
+                    if self._extract_images(event, allow_video=False):
+                        yield event.plain_result(
+                            "影视封面由 TMDB 自动获取，无需发图。\n评分发「评分 8」，标签发「#科幻」，影评直接发文字。"
+                        )
+                        return
                 images = self._extract_images(event, allow_video=allow_video)
                 if images:
                     logger.info("BlogWriter: 提取到 %d 张图片引用: %s", len(images), images[:3])
@@ -915,6 +986,27 @@ class BlogWriter(Star):
                             )
                         else:
                             yield event.plain_result("账单解析失败：{}，请重发。".format(err))
+                    elif session.kind == "media":
+                        # 影视会话：评分行 / #标签 / 其余为影评正文
+                        score = parse_media_score(text)
+                        if score is not None:
+                            session.meta["score"] = score
+                            session.touch()
+                            yield event.plain_result("已记录评分：{}。发 /发布 提交，发 /取消 放弃。".format(score))
+                            return
+                        clean, tags = extract_tags(text)
+                        if tags:
+                            existing = session.meta.setdefault("tags", [])
+                            for t in tags:
+                                if t not in existing:
+                                    existing.append(t)
+                        if clean:
+                            session.add_text(clean)
+                        session.touch()
+                        tag_hint = "，标签：{}".format(" ".join("#" + t for t in session.meta.get("tags", []))) if session.meta.get("tags") else ""
+                        score_hint = "，评分：{}".format(session.meta.get("score")) if session.meta.get("score") is not None else ""
+                        yield event.plain_result("已记录{}{}。发 /发布 提交，发 /取消 放弃。".format(score_hint, tag_hint))
+                        return
                     elif session.kind == "birthday":
                         # 生日会话：下一句口语走批量生日正则（支持单条与多个人物）
                         items, err = parse_schedules_batch(text)
@@ -1116,6 +1208,9 @@ class BlogWriter(Star):
         if session.images:
             if session.kind == "album":
                 folder = album_folder
+            elif session.kind == "media":
+                # 影视封面独立目录（对齐博客图床惯例 blog/bangumi）
+                folder = self._cfg("bangumi_upload_folder") or "blog/bangumi"
             else:
                 # 博客图床目录已统一（2026-08-13）：插件上传的图片全部进 imgbed_upload_folder（默认 blog/moments）
                 folder = self._cfg("imgbed_upload_folder") or "blog/moments"
@@ -1178,6 +1273,22 @@ class BlogWriter(Star):
                 md = build_album_md(album_name, album_folder, now)
                 path = "src/content/album/{}.md".format(clean_name)
                 link = "/album/{}".format(clean_name)
+            elif session.kind == "media":
+                # 影视条目：对齐博客现有 src/content/bangumi/anime/ 文件（封面已在上方上传）
+                if not image_urls:
+                    return event.plain_result("封面缺失，无法发布（请重新 /影视 搜索）。")
+                media_title = str(session.meta.get("title") or "").strip()
+                md = build_bangumi_md(
+                    media_title,
+                    image_urls[0],
+                    session.meta.get("subcategory") or "movie",
+                    session.meta.get("score"),
+                    session.meta.get("tags") or [],
+                    session.full_text(),
+                    now=now,
+                )
+                path = "src/content/bangumi/anime/{}.md".format(clean_filename_part(media_title))
+                link = "/bangumi"
             elif session.kind == "bill":
                 if not session.meta or session.meta.get("amount") is None:
                     return event.plain_result("账单信息不完整，请先发送账单内容（如：今天午餐微信花了32）。")
@@ -1807,6 +1918,9 @@ class BlogWriter(Star):
             "　可一句多人：我的8.24对象12.22\n"
             "/纪念日 结婚纪念日 农历5.20\n"
             "　格式：标题 日期 @人物\n"
+            "/影视 侏罗纪世界\n"
+            "　封面自动从 TMDB 获取\n"
+            "　随后可发：评分 8、#标签、影评\n"
             "\n"
             "———— 🔧 管会话 ————\n"
             "/发布　提交当前会话\n"
