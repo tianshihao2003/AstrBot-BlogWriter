@@ -812,6 +812,21 @@ class TestBillSchedule(unittest.TestCase):
         self.assertEqual(sess.meta.get("type"), "liability")
         self.assertEqual(sess.meta.get("amount"), -2000)
 
+    def test_bill_session_modify_category_account(self):
+        # 识别后 /发布 前可手动改分类与账户
+        asyncio.get_event_loop().run_until_complete(self._send("/账单 理发30"))
+        sess = self.plugin._sessions.get("u1")
+        self.assertEqual(sess.meta.get("category"), "其他")
+        replies = asyncio.get_event_loop().run_until_complete(self._send("分类: 人情收礼"))
+        self.assertTrue(any("已修改分类" in r for r in replies))
+        self.assertEqual(sess.meta.get("category"), "人情收礼")
+        replies = asyncio.get_event_loop().run_until_complete(self._send("账户: 现金"))
+        self.assertTrue(any("已修改账户" in r for r in replies))
+        self.assertEqual(sess.meta.get("account"), "现金")
+        # 白名单外分类拒绝
+        replies = asyncio.get_event_loop().run_until_complete(self._send("分类: 不存在的分类"))
+        self.assertTrue(any("白名单" in r for r in replies))
+
     def test_remind_command(self):
         replies = asyncio.get_event_loop().run_until_complete(self._send("/提醒"))
         self.assertTrue(any("提醒" in r for r in replies))

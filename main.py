@@ -1022,6 +1022,43 @@ class BlogWriter(Star):
                             "相册只接收图片。请直接发图片，或发 /发布 提交、/取消 放弃。"
                         )
                     elif session.kind in ("bill", "bill_batch"):
+                        # 手动修改：分类:餐饮 / 账户:支付宝（识别错或不识别时纠正）
+                        m_cat = re.match(r"^(?:分类|类别|category)\s*[:：]?\s*(\S{1,10})\s*$", text)
+                        m_acc = re.match(r"^(?:账户|账号|account)\s*[:：]?\s*(\S{1,10})\s*$", text)
+                        if m_cat or m_acc:
+                            if session.kind == "bill_batch":
+                                yield event.plain_result("批量账单暂不支持逐条修改，请发 /取消 后重新逐条记录。")
+                                return
+                            if m_cat:
+                                cat = m_cat.group(1)
+                                if session.meta.get("type") == "liability":
+                                    yield event.plain_result("负债的分类固定为「负债」，无需修改。")
+                                    return
+                                if cat not in BILL_CATEGORIES:
+                                    yield event.plain_result(
+                                        "分类「{}」不在白名单，可选：{}。".format(cat, "、".join(BILL_CATEGORIES))
+                                    )
+                                    return
+                                session.meta["category"] = cat
+                                session.touch()
+                                yield event.plain_result(
+                                    "已修改分类：{}。当前账单：{} 金额{}，分类{}，账户{}。发 /发布 提交。".format(
+                                        cat, session.meta.get("title"), session.meta.get("amount"),
+                                        session.meta.get("category"), session.meta.get("account"),
+                                    )
+                                )
+                                return
+                            if m_acc:
+                                acc = m_acc.group(1)
+                                session.meta["account"] = acc
+                                session.touch()
+                                yield event.plain_result(
+                                    "已修改账户：{}。当前账单：{} 金额{}，分类{}，账户{}。发 /发布 提交。".format(
+                                        acc, session.meta.get("title"), session.meta.get("amount"),
+                                        session.meta.get("category"), session.meta.get("account"),
+                                    )
+                                )
+                                return
                         # 空会话后下一句口语：正则解析（支持批量）
                         try:
                             batch, _ = parse_bills_batch(text)

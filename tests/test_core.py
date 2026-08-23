@@ -586,6 +586,17 @@ class TestBillSchedule(unittest.TestCase):
         self.assertEqual(data["type"], "expense")
         self.assertEqual(data["amount"], -30)
 
+    def test_parse_bill_category_prefix(self):
+        # 首词分类前缀：关键词没命中的冷门消费（如理发）可显式指定分类
+        data, _ = parse_bill("食品酒水 买了箱牛奶45")
+        self.assertEqual(data["category"], "食品酒水")
+        self.assertEqual(data["title"], "买了箱牛奶")
+        # 类型 + 分类组合前缀
+        data2, _ = parse_bill("支出 餐饮 午餐30")
+        self.assertEqual(data2["type"], "expense")
+        self.assertEqual(data2["category"], "餐饮")
+        self.assertEqual(data2["title"], "午餐")
+
     def test_build_bill_md(self):
         md = build_bill_md(
             {

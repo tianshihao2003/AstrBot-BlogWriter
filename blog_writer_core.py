@@ -1055,12 +1055,22 @@ def parse_bill(text: str, now=None) -> Tuple[Optional[Dict], str]:
     if not raw:
         return None, "内容为空"
 
-    # 显式类型前缀：首词为类型词（支出/收入/负债/借款/还款…）且后跟空格 → 移除后继续解析
+    # 显式前缀（首词 + 空格）：类型前缀（支出/收入/负债…）或分类前缀（白名单分类名如「餐饮」）
     type_hint = None
+    category_hint = None
     first_token = re.split(r"\s+", raw, 1)[0]
-    if first_token in _BILL_TYPE_PREFIX and re.search(r"\s", raw):
-        type_hint = _BILL_TYPE_PREFIX[first_token]
-        raw = re.sub(r"^\S+\s+", "", raw, count=1).strip()
+    if re.search(r"\s", raw):
+        if first_token in _BILL_TYPE_PREFIX:
+            type_hint = _BILL_TYPE_PREFIX[first_token]
+            raw = re.sub(r"^\S+\s+", "", raw, count=1).strip()
+            # 类型前缀后紧跟分类前缀也支持（如「支出 餐饮 午餐30」）
+            second_token = re.split(r"\s+", raw, 1)[0]
+            if second_token in BILL_CATEGORIES and re.search(r"\s", raw):
+                category_hint = second_token
+                raw = re.sub(r"^\S+\s+", "", raw, count=1).strip()
+        elif first_token in BILL_CATEGORIES:
+            category_hint = first_token
+            raw = re.sub(r"^\S+\s+", "", raw, count=1).strip()
     if not raw:
         return None, "内容为空"
 
@@ -1097,7 +1107,10 @@ def parse_bill(text: str, now=None) -> Tuple[Optional[Dict], str]:
     if isinstance(amount, float) and amount == int(amount):
         amount = int(amount)
 
-    if type_ == "liability":
+    if category_hint:
+        # 显式分类前缀优先于关键词检测
+        category = category_hint
+    elif type_ == "liability":
         # 对齐博客现有负债数据：category 固定「负债」（tags 由 build_bill_md 按 category 自动生成）
         category = "负债"
     else:
