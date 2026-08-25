@@ -122,6 +122,15 @@ try:
         validate_friend_data,
         with_suffix,
         Session,
+        format_choices,
+        parse_choice,
+        is_wizard_cancel,
+        is_wizard_skip,
+        is_wizard_new,
+        MEDIA_WIZARD_CATEGORIES,
+        BILL_WIZARD_LIABILITY_ACCOUNTS,
+        WIZARD_CANCEL_KEYWORDS,
+        WIZARD_SKIP_KEYWORDS,
     )
 except ImportError:  # 兼容非包形式加载
     from blog_writer_core import (
@@ -182,6 +191,15 @@ except ImportError:  # 兼容非包形式加载
         validate_friend_data,
         with_suffix,
         Session,
+        format_choices,
+        parse_choice,
+        is_wizard_cancel,
+        is_wizard_skip,
+        is_wizard_new,
+        MEDIA_WIZARD_CATEGORIES,
+        BILL_WIZARD_LIABILITY_ACCOUNTS,
+        WIZARD_CANCEL_KEYWORDS,
+        WIZARD_SKIP_KEYWORDS,
     )
 
 CONNECT_TIMEOUT = 15
@@ -534,9 +552,38 @@ class BlogWriter(Star):
         except Exception as e:
             logger.warning("BlogWriter: 调度提醒失败: %s", e)
 
-    # ---------- 会话创建（账单/日程/提醒） ----------
+    # ---------- 向导辅助 ----------
 
     _BILL_TYPE_LABELS = {"expense": "支出", "income": "收入", "liability": "负债", "transfer": "转账"}
+
+    async def _list_notebook_names(self, repo: str, branch: str, token: str) -> List[str]:
+        """列出 src/content/life/notebooks 下的一级目录名（笔记本名）。失败回退到默认。"""
+        url = "https://api.github.com/repos/{}/contents/src/content/life/notebooks?ref={}".format(
+            repo, urllib.parse.quote(branch)
+        )
+        headers = {
+            "Authorization": "Bearer " + token,
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+        }
+        try:
+            resp = await self._get_client().get(url, headers=headers)
+            if resp.status_code != 200:
+                return []
+            import json as _json
+            items = _json.loads(resp.text)
+            names = []
+            for it in items:
+                if isinstance(it, dict) and it.get("type") == "dir":
+                    n = str(it.get("name") or "").strip()
+                    if n and not n.startswith("."):
+                        names.append(n)
+            return sorted(names)
+        except Exception as e:
+            logger.warning("BlogWriter: 列笔记本失败: %s", e)
+            return []
+
+    # ---------- 会话创建（账单/日程/提醒） ----------
 
     def _apply_bill_defaults(self, item: Dict) -> None:
         """正则解析出的账单项应用配置默认值（账户/分类为「其他」时替换）。
@@ -579,15 +626,18 @@ class BlogWriter(Star):
         if parsed is None:
             return event.plain_result("账单解析失败：{}，请重发或发 /取消。".format(err))
         self._apply_bill_defaults(parsed)
-        self._sessions[user_id] = Session("bill", parsed)
+        # 进入账单向导：让用户确认类型
+        t = parsed.get("type")
+        label = self._BILL_TYPE_LABELS.get(t, t)
+        sess = Session("bill", parsed)
+        sess.wizard = {"step": "bill_confirm_type", "parsed": dict(parsed)}
+        self._sessions[user_id] = sess
         return event.plain_result(
-            "已识别账单：{} 金额{}（{}），分类{}，账户{}。发 /发布 提交，发 /取消 放弃。".format(
-                parsed.get("title"),
-                parsed.get("amount"),
-                self._BILL_TYPE_LABELS.get(parsed.get("type"), parsed.get("type")),
-                parsed.get("category"),
-                parsed.get("account"),
+            "已识别账单：{} 金额{}（{}），分类{}，账户{}\n\n".format(
+                parsed.get("title"), parsed.get("amount"), label, parsed.get("category"), parsed.get("account")
             )
+            + format_choices("请确认类型：", ["支出", "收入", "负债-借入", "负债-还款"], extra=["直接发布"], with_skip_cancel=False)
+            + f"\n\n当前猜测：{label}（选对应数字，或 5 直接发布）"
         )
 
     def _apply_schedule_defaults(self, item: Dict) -> None:
@@ -747,6 +797,10 @@ class BlogWriter(Star):
             "发 /发布 提交，/取消 放弃。".format(name)
         )
 
+    def _media_type_prompt(self) -> str:
+        items = [f"{label}（{val}）" for label, val in MEDIA_WIZARD_CATEGORIES]
+        return format_choices("请选择类型：", items, with_skip_cancel=False)
+
     async def _start_media(self, event: AstrMessageEvent, user_id: str, args: List[str]):
         """/影视 片名 —— TMDB 搜索取中文片名+封面（字节立即下载入会话，/发布 时上传图床独立目录）。"""
         name = " ".join(args).strip()
@@ -765,13 +819,13 @@ class BlogWriter(Star):
             return event.plain_result("TMDB 请求失败（网络不通？可在配置 tmdb_api_base 填反代地址）。")
         info, err = parse_tmdb_search_response(resp.status_code, resp.text)
         if info is None:
-            # TMDB 搜不到 → 手动模式：等用户发封面图，名称/类型可键值对改
+            # TMDB 搜不到 → 手动模式：等用户发封面图，类型用向导选
             session = Session("media", {"title": name, "subcategory": "", "score": None, "tags": [], "manual": True})
+            session.wizard = {"step": "media_need_cover"}
             self._sessions[user_id] = session
             return event.plain_result(
                 "TMDB 未找到「{}」，已转手动模式：\n"
-                "请直接发一张封面图（必须），可发「名称: xxx」「类型: 剧集」修改，\n"
-                "评分发「评分 8」、标签发「#科幻」、影评直接发文字，/发布 提交。".format(name)
+                "请直接发一张封面图（必须）。\n发图后我会让你选类型/评分/标签。".format(name)
             )
         # 下载封面字节（立即，避免发布时再等网络）
         poster_bytes = None
@@ -792,12 +846,12 @@ class BlogWriter(Star):
         if poster_bytes:
             session.add_image(filename, poster_bytes)
         else:
-            # 封面下载失败（无海报/CDN 不通）→ 同样转手动模式（保留 TMDB 信息）
+            # 封面下载失败（无海报/CDN 不通）→ 手动模式，发图后走类型向导
             session.meta["manual"] = True
+            session.wizard = {"step": "media_need_cover"}
             self._sessions[user_id] = session
             return event.plain_result(
-                "已找到《{}》（{}）但封面下载失败，请直接发一张封面图，"
-                "或只发评分/#标签/影评后 /发布（发图前发布会提示缺封面）。".format(info["title"], info["year"] or "未知年份")
+                "已找到《{}》（{}）但封面下载失败，请直接发一张封面图。\n发图后我会让你选类型/评分/标签。".format(info["title"], info["year"] or "未知年份")
             )
         self._sessions[user_id] = session
         vote = info.get("vote_average")
@@ -917,7 +971,7 @@ class BlogWriter(Star):
                 yield self._start_moment(event, user_id, args)
                 return
             if cmd == "笔记":
-                yield self._start_note(event, user_id, args)
+                yield await self._start_note(event, user_id, args)
                 return
             if cmd == "足迹":
                 yield self._start_place(event, user_id, args)
@@ -926,7 +980,7 @@ class BlogWriter(Star):
                 yield self._start_friend(event, user_id, raw)
                 return
             if cmd == "相册":
-                yield self._start_album(event, user_id, args)
+                yield await self._start_album(event, user_id, args)
                 return
             if cmd == "账单":
                 yield await self._start_bill(event, user_id, args, raw)
@@ -979,7 +1033,28 @@ class BlogWriter(Star):
                     self._sessions.pop(user_id, None)
                     yield event.plain_result("上一个会话已超时作废，请重新发指令。")
                     return
+                # 影视/书籍图片优先：先收图，再走向导（避免 wizard 拦截图片消息）
                 allow_video = session.kind == "moment"  # 视频仅动态支持；笔记/足迹/相册仍只收图片
+                if session.kind in ("media", "book") and getattr(session, "wizard", None) and session.wizard.get("step") == "media_need_cover":
+                    # 检查是否有图片，有则先收图
+                    _pre_cover = self._extract_images(event, allow_video=False)
+                    if not _pre_cover:
+                        _pre_raw = self._extract_wx_raw_media(event, allow_video=False)
+                        if _pre_raw:
+                            _pre_cover = ["pre"]
+                    if _pre_cover:
+                        pass  # 有图，跳过 wizard 分发，直接走下面的收图逻辑
+                    else:
+                        res = await self._handle_wizard(event, user_id, raw)
+                        if res is not None:
+                            yield res
+                            return
+                elif getattr(session, "wizard", None):
+                    res = await self._handle_wizard(event, user_id, raw)
+                    if res is not None:
+                        yield res
+                        return
+                    # wizard 已消费但无回复则继续走图片/文本逻辑
                 if session.kind in ("media", "book"):
                     # 影视/书籍：用户发图 = 替换/提供封面（取最后一张，多次发图以最后为准）
                     cover_refs = self._extract_images(event, allow_video=False)
@@ -1007,6 +1082,13 @@ class BlogWriter(Star):
                         session.images.clear()
                         session.add_image(filename, data)
                         session.touch()
+                        # 手动模式下发图后进入类型向导
+                        if getattr(session, "wizard", None) and session.wizard.get("step") == "media_need_cover":
+                            session.wizard = {"step": "media_pick_category"}
+                            yield event.plain_result(
+                                "封面已更新。\n" + self._media_type_prompt()
+                            )
+                            return
                         yield event.plain_result(
                             "封面已更新（发布时上传图床）。继续发评分/#标签/影评，或 /发布 提交。"
                         )
@@ -1288,16 +1370,38 @@ class BlogWriter(Star):
             "动态已创建：{}{}\n\n可以直接发图片、动图 GIF 或视频（可多发），发完说 /发布。".format(content, tag_hint)
         )
 
-    def _start_note(self, event: AstrMessageEvent, user_id: str, args: List[str]):
+    async def _start_note(self, event: AstrMessageEvent, user_id: str, args: List[str]):
         default_dir = self._cfg("default_note_dir") or "日常随笔"
-        note_dir, title = parse_note(args, default_dir)
-        if not title:
-            return event.plain_result("格式：/笔记 [分类] 标题（例如：/笔记 日常随笔 标题）")
-        self._sessions[user_id] = Session("note", {"note_dir": note_dir, "title": title})
+        # 带参快车道：/笔记 分类 标题
+        if args:
+            note_dir, title = parse_note(args, default_dir)
+            if title:
+                self._sessions[user_id] = Session("note", {"note_dir": note_dir, "title": title})
+                return event.plain_result(
+                    "笔记已创建：分类「{}」标题「{}」。\n\n接下来直接发正文（可多条，自动拼接），也可以发图片，发完说 /发布。".format(
+                        note_dir, title
+                    )
+                )
+        # 空参进向导：先选笔记本
+        repo = self._cfg("github_repo") or "tianshihao2003/dumplingandcakeblog"
+        branch = self._cfg("github_branch") or "main"
+        token = (self._cfg("github_token") or "").strip()
+        names = await self._list_notebook_names(repo, branch, token)
+        if not names:
+            names = [default_dir]
+        # 去重并把默认放首位
+        uniq = []
+        seen = set()
+        for n in [default_dir] + names:
+            if n not in seen:
+                seen.add(n)
+                uniq.append(n)
+        sess = Session("note", {"note_dir": "", "title": ""})
+        sess.wizard = {"step": "note_pick_notebook", "notebooks": uniq, "default_dir": default_dir}
+        self._sessions[user_id] = sess
         return event.plain_result(
-            "笔记已创建：分类「{}」标题「{}」。\n\n接下来直接发正文（可多条，自动拼接），也可以发图片，发完说 /发布。".format(
-                note_dir, title
-            )
+            format_choices("请选择笔记本：", uniq, extra=["新建笔记本"], with_skip_cancel=False)
+            + "\n\n也可直接回复笔记本名称新建。"
         )
 
     def _start_friend(self, event: AstrMessageEvent, user_id: str, raw: str):
@@ -1335,13 +1439,43 @@ class BlogWriter(Star):
             )
         )
 
-    def _start_album(self, event: AstrMessageEvent, user_id: str, args: List[str]):
+    async def _start_album(self, event: AstrMessageEvent, user_id: str, args: List[str]):
+        # 带参快车道
         name = parse_album(args)
-        if not name:
-            return event.plain_result("格式：/相册 相册名（例如：/相册 情侣头像）")
-        self._sessions[user_id] = Session("album", {"name": name})
+        if name:
+            self._sessions[user_id] = Session("album", {"name": name})
+            return event.plain_result(
+                "相册「{}」已创建。\n\n请直接发图片（可多发），发完说 /发布。".format(name)
+            )
+        # 空参进向导：列出现有相册
+        repo = self._cfg("github_repo") or "tianshihao2003/dumplingandcakeblog"
+        branch = self._cfg("github_branch") or "main"
+        token = (self._cfg("github_token") or "").strip()
+        idx = await self._album_index(repo, branch, token)
+        if idx is None:
+            return event.plain_result("GitHub 查询失败（网络或 Token 问题），请稍后重试或直接发 /相册 相册名 快捷创建。")
+        # 去重展示：title(文件名) 形式
+        seen_titles = {}
+        display = []
+        for fname, folder in idx.get("files", {}).items():
+            try:
+                content = await self._github_file_content(repo, "src/content/album/" + fname, branch, token)
+                t, _f = parse_album_frontmatter(content or "")
+                t = (t or fname.replace(".md", "")).strip()
+            except Exception:
+                t = fname.replace(".md", "")
+            if t not in seen_titles:
+                seen_titles[t] = fname
+                display.append(f"{t}（{fname}）")
+        # 按展示排序
+        display.sort()
+        sess = Session("album", {"name": ""})
+        sess.wizard = {"step": "album_pick", "display": display, "titles": list(seen_titles.keys()), "files": seen_titles}
+        self._sessions[user_id] = sess
+        if not display:
+            return event.plain_result("当前还没有相册，直接回复新相册名称即可创建。\n回复“取消”退出。")
         return event.plain_result(
-            "相册「{}」已创建。\n\n请直接发图片（可多发），发完说 /发布。".format(name)
+            format_choices("请选择相册：", display, extra=["新建相册"], with_skip_cancel=False)
         )
 
     # ---------- 发布 ----------
@@ -2113,6 +2247,311 @@ class BlogWriter(Star):
             logger.warning("BlogWriter: AES 解密失败: %s", e)
             return None
 
+    # ---------- 向导分发 ----------
+
+    async def _handle_wizard(self, event: AstrMessageEvent, user_id: str, raw: str):
+        sess = self._sessions.get(user_id)
+        if not sess or not getattr(sess, "wizard", None):
+            return None
+        step = sess.wizard.get("step", "")
+        text = (raw or "").strip()
+
+        # 通用取消
+        if is_wizard_cancel(text):
+            self._sessions.pop(user_id, None)
+            return event.plain_result("已取消当前会话。")
+
+        # ---- 笔记向导 ----
+        if step == "note_pick_notebook":
+            notebooks = sess.wizard.get("notebooks", [])
+            n = len(notebooks)
+            total = n + 1  # 含新建
+            choice = parse_choice(text, total)
+            if choice is not None:
+                if choice == total:  # 新建
+                    sess.wizard = {"step": "note_input_new_notebook", "notebooks": notebooks, "default_dir": sess.wizard.get("default_dir")}
+                    return event.plain_result("请输入新笔记本名称（将作为文件夹名，非法字符会自动替换为 -）：")
+                else:
+                    picked = notebooks[choice - 1]
+                    sess.meta["note_dir"] = picked
+                    sess.wizard = {"step": "note_input_title", "note_dir": picked}
+                    sess.touch()
+                    return event.plain_result(f"已选笔记本「{picked}」。\n请输入笔记标题：")
+            # 非数字：当作新建名直接处理
+            if text and len(text) <= 30:
+                chk = clean_filename_part(text)
+                if not chk or chk == "friend":
+                    return event.plain_result("名称无效，请重发（1-30字，避免特殊符号）。或回复数字选择。")
+                if text.strip() in notebooks:
+                    sess.meta["note_dir"] = text.strip()
+                    sess.wizard = {"step": "note_input_title", "note_dir": text.strip()}
+                    sess.touch()
+                    return event.plain_result(f"已选笔记本「{text.strip()}」。\n请输入笔记标题：")
+                sess.meta["note_dir"] = text.strip()
+                sess.wizard = {"step": "note_input_title", "note_dir": text.strip()}
+                sess.touch()
+                return event.plain_result(f"已创建笔记本「{text.strip()}」。\n请输入笔记标题：")
+            return event.plain_result("请回复数字选择，或直接发新笔记本名称。\n" + format_choices("请选择笔记本：", notebooks, extra=["新建笔记本"], with_skip_cancel=False))
+
+        if step == "note_input_new_notebook":
+            if not text:
+                return event.plain_result("名称不能为空，请重发。")
+            chk = clean_filename_part(text)
+            if not chk or chk == "friend":
+                return event.plain_result("名称无效，请重发。")
+            sess.meta["note_dir"] = text.strip()
+            sess.wizard = {"step": "note_input_title", "note_dir": text.strip()}
+            sess.touch()
+            return event.plain_result(f"已选笔记本「{text.strip()}」。\n请输入笔记标题：")
+
+        if step == "note_input_title":
+            if not text:
+                return event.plain_result("标题不能为空，请重发笔记标题：")
+            sess.meta["title"] = text.strip()
+            sess.wizard = None
+            sess.touch()
+            return event.plain_result(
+                f"笔记已创建：分类「{sess.meta['note_dir']}」标题「{text.strip()}」。\n\n接下来直接发正文（可多条，自动拼接），也可以发图片，发完说 /发布。"
+            )
+
+        # ---- 相册向导 ----
+        if step == "album_pick":
+            titles = sess.wizard.get("titles", [])
+            display = sess.wizard.get("display", [])
+            total = len(display) + 1
+            choice = parse_choice(text, total)
+            if choice is not None:
+                if choice == total:  # 新建
+                    sess.wizard = {"step": "album_input_new", "titles": titles, "display": display}
+                    return event.plain_result("请输入新相册名称：")
+                picked = titles[choice - 1]
+                sess.meta["name"] = picked
+                sess.wizard = None
+                sess.touch()
+                return event.plain_result(f"已选相册「{picked}」\n请直接发图片（可多发），发完说 /发布。")
+            if text and len(text) <= 40:
+                chk = clean_filename_part(text)
+                if chk and chk != "friend":
+                    sess.meta["name"] = text.strip()
+                    sess.wizard = None
+                    sess.touch()
+                    return event.plain_result(f"相册「{text.strip()}」已创建。\n请直接发图片（可多发），发完说 /发布。")
+            return event.plain_result("请回复数字选择，或直接发新相册名称。\n" + format_choices("请选择相册：", display, extra=["新建相册"], with_skip_cancel=False))
+
+        if step == "album_input_new":
+            if not text:
+                return event.plain_result("相册名不能为空，请重发。")
+            chk = clean_filename_part(text)
+            if not chk or chk == "friend":
+                return event.plain_result("相册名无效，请重发。")
+            sess.meta["name"] = text.strip()
+            sess.wizard = None
+            sess.touch()
+            return event.plain_result(f"相册「{text.strip()}」已创建。\n请直接发图片（可多发），发完说 /发布。")
+
+        # ---- 影视/书籍向导 ----
+        if step == "media_need_cover":
+            # 兼容旧路径：允许发 名称:/类型: 键值对修正标题/类型
+            fields = parse_media_fields(text)
+            if fields:
+                if fields.get("title"):
+                    sess.meta["title"] = fields["title"]
+                if fields.get("subcategory"):
+                    sess.meta["subcategory"] = fields["subcategory"]
+                sess.touch()
+                return event.plain_result("已修改：{}。请发封面图后继续。".format("，".join(f"{k}={v}" for k,v in fields.items())))
+            return event.plain_result("请先发一张封面图（必须），发图后我会让你选类型。\n回复“取消”退出。")
+
+        if step == "media_pick_category":
+            choice = parse_choice(text, len(MEDIA_WIZARD_CATEGORIES))
+            if choice is not None:
+                label, val = MEDIA_WIZARD_CATEGORIES[choice - 1]
+                if val == "game":
+                    sess.meta["category"] = "game"
+                    sess.meta.pop("subcategory", None)
+                elif val in ("movie", "tv"):
+                    sess.meta["category"] = "anime"
+                    sess.meta["subcategory"] = val
+                else:  # anime / documentary
+                    sess.meta["category"] = "anime"
+                    sess.meta["subcategory"] = val
+                sess.wizard = {"step": "media_score"}
+                sess.touch()
+                return event.plain_result(f"已选类型「{label}」。\n请发评分 0-10（整数），或回复“跳过”：")
+            if is_wizard_skip(text):
+                sess.meta["subcategory"] = sess.meta.get("subcategory") or "movie"
+                sess.wizard = {"step": "media_score"}
+                sess.touch()
+                return event.plain_result("已跳过类型（默认 电影）。\n请发评分 0-10，或回复“跳过”：")
+            return event.plain_result("请回复数字选择类型：\n" + self._media_type_prompt())
+
+        if step == "media_score":
+            if is_wizard_skip(text):
+                sess.meta["score"] = None
+                sess.wizard = {"step": "media_tags"}
+                sess.touch()
+                return event.plain_result("已跳过评分。\n请发标签（#科幻 #冒险 形式，多标签空格分隔），或回复“跳过”：")
+            score = parse_media_score(text)
+            if score is not None:
+                sess.meta["score"] = score
+                sess.wizard = {"step": "media_tags"}
+                sess.touch()
+                return event.plain_result(f"已记录评分：{score}。\n请发标签（#科幻 形式），或回复“跳过”：")
+            # 兼容纯数字
+            if text.strip().isdigit():
+                try:
+                    v = max(0, min(10, int(text.strip())))
+                    sess.meta["score"] = v
+                    sess.wizard = {"step": "media_tags"}
+                    sess.touch()
+                    return event.plain_result(f"已记录评分：{v}。\n请发标签（#科幻 形式），或回复“跳过”：")
+                except Exception:
+                    pass
+            return event.plain_result("评分格式不对，请发 0-10 的数字（如：8、评分 8），或回复“跳过”。")
+
+        if step == "media_tags":
+            if is_wizard_skip(text):
+                sess.wizard = None
+                sess.touch()
+                return event.plain_result("已跳过标签。发 /发布 提交，或继续发影评文字。")
+            clean, tags = extract_tags(text)
+            if tags:
+                existing = sess.meta.setdefault("tags", [])
+                for t in tags:
+                    if t not in existing:
+                        existing.append(t)
+            if clean:
+                sess.add_text(clean)
+            sess.wizard = None
+            sess.touch()
+            tag_hint = f"标签：{' '.join('#'+t for t in sess.meta.get('tags',[]))}" if sess.meta.get("tags") else "无标签"
+            return event.plain_result(f"已记录，{tag_hint}。发 /发布 提交，或继续发影评。")
+
+        # ---- 账单向导 ----
+        if step == "bill_confirm_type":
+            # 兼容旧路径：会话内发 "分类:xxx / 账户:xxx" 直接修改（向导中也放行）
+            m_cat_early = re.match(r"^(?:分类|类别|category)\s*[:：]?\s*(\S{1,10})\s*$", text)
+            m_acc_early = re.match(r"^(?:账户|账号|account)\s*[:：]?\s*(\S{1,10})\s*$", text)
+            if m_cat_early:
+                cat = m_cat_early.group(1)
+                if sess.meta.get("type") == "liability":
+                    return event.plain_result("负债的分类固定为「负债」，无需修改。")
+                if cat not in BILL_CATEGORIES:
+                    return event.plain_result("分类「{}」不在白名单，可选：{}。".format(cat, "、".join(BILL_CATEGORIES)))
+                sess.meta["category"] = cat
+                sess.touch()
+                return event.plain_result("已修改分类：{}。当前账单：{} 金额{}，分类{}，账户{}。发 /发布 提交。".format(
+                    cat, sess.meta.get("title"), sess.meta.get("amount"), sess.meta.get("category"), sess.meta.get("account")))
+            if m_acc_early:
+                acc = m_acc_early.group(1)
+                sess.meta["account"] = acc
+                sess.touch()
+                return event.plain_result("已修改账户：{}。当前账单：{} 金额{}，分类{}，账户{}。发 /发布 提交。".format(
+                    acc, sess.meta.get("title"), sess.meta.get("amount"), sess.meta.get("category"), sess.meta.get("account")))
+            choice = parse_choice(text, 5)
+            if choice is not None:
+                if choice == 5:  # 直接发布
+                    sess.wizard = None
+                    sess.touch()
+                    return event.plain_result("已确认，直接发布请发 /发布。当前账单：{} 金额{}，分类{}，账户{}。".format(
+                        sess.meta.get("title"), sess.meta.get("amount"), sess.meta.get("category"), sess.meta.get("account")))
+                mapping = {1: "expense", 2: "income", 3: "liability_borrow", 4: "liability_repay"}
+                picked = mapping.get(choice)
+                if picked == "expense":
+                    sess.meta["type"] = "expense"
+                    sess.meta["amount"] = -abs(sess.meta.get("amount", 0))
+                elif picked == "income":
+                    sess.meta["type"] = "income"
+                    sess.meta["amount"] = abs(sess.meta.get("amount", 0))
+                elif picked == "liability_borrow":
+                    sess.meta["type"] = "liability"
+                    sess.meta["amount"] = abs(sess.meta.get("amount", 0))
+                    sess.meta["category"] = "负债"
+                elif picked == "liability_repay":
+                    sess.meta["type"] = "liability"
+                    sess.meta["amount"] = -abs(sess.meta.get("amount", 0))
+                    sess.meta["category"] = "负债"
+                    sess.wizard = {"step": "bill_pick_repay_account"}
+                    sess.touch()
+                    return event.plain_result(
+                        format_choices("还款到哪个账户？", BILL_WIZARD_LIABILITY_ACCOUNTS, with_skip_cancel=False)
+                        + "\n\n也可直接回复账户名（如：花呗）"
+                    )
+                # 非还款：进入分类选择（负债借入跳过分类）
+                if sess.meta.get("type") == "liability":
+                    sess.wizard = {"step": "bill_pick_account"}
+                    sess.touch()
+                    return event.plain_result(
+                        format_choices("请选择账户：", BILL_ACCOUNTS, with_skip_cancel=False)
+                        + "\n也可直接回复账户名"
+                    )
+                sess.wizard = {"step": "bill_pick_category"}
+                sess.touch()
+                return event.plain_result(format_choices("请选择分类：", BILL_CATEGORIES, with_skip_cancel=False))
+            return event.plain_result("请回复数字 1-5 选择类型：\n" + format_choices("请确认类型：", ["支出", "收入", "负债-借入", "负债-还款"], extra=["直接发布"], with_skip_cancel=False))
+
+        if step == "bill_pick_category":
+            choice = parse_choice(text, len(BILL_CATEGORIES))
+            if choice is not None:
+                sess.meta["category"] = BILL_CATEGORIES[choice - 1]
+                sess.wizard = {"step": "bill_pick_account"}
+                sess.touch()
+                return event.plain_result(format_choices("请选择账户：", BILL_ACCOUNTS, with_skip_cancel=False) + "\n也可直接回复账户名")
+            if text and text.strip() in BILL_CATEGORIES:
+                sess.meta["category"] = text.strip()
+                sess.wizard = {"step": "bill_pick_account"}
+                sess.touch()
+                return event.plain_result(format_choices("请选择账户：", BILL_ACCOUNTS, with_skip_cancel=False))
+            return event.plain_result("请回复数字选择分类：\n" + format_choices("请选择分类：", BILL_CATEGORIES, with_skip_cancel=False))
+
+        if step == "bill_pick_account":
+            all_accounts = BILL_ACCOUNTS + [a for a in BILL_WIZARD_LIABILITY_ACCOUNTS if a not in BILL_ACCOUNTS]
+            choice = parse_choice(text, len(all_accounts))
+            if choice is not None:
+                sess.meta["account"] = all_accounts[choice - 1]
+                sess.wizard = None
+                sess.touch()
+                return event.plain_result("账单已确认：{} 金额{}，分类{}，账户{}。发 /发布 提交。".format(
+                    sess.meta.get("title"), sess.meta.get("amount"), sess.meta.get("category"), sess.meta.get("account")))
+            if text and 1 <= len(text.strip()) <= 10:
+                sess.meta["account"] = text.strip()
+                sess.wizard = None
+                sess.touch()
+                return event.plain_result("账单已确认：{} 金额{}，分类{}，账户{}。发 /发布 提交。".format(
+                    sess.meta.get("title"), sess.meta.get("amount"), sess.meta.get("category"), sess.meta.get("account")))
+            return event.plain_result("请回复数字选择账户，或直接发账户名：\n" + format_choices("请选择账户：", all_accounts, with_skip_cancel=False))
+
+        if step == "bill_pick_repay_account":
+            choice = parse_choice(text, len(BILL_WIZARD_LIABILITY_ACCOUNTS))
+            if choice is not None:
+                sess.meta["account"] = BILL_WIZARD_LIABILITY_ACCOUNTS[choice - 1]
+                sess.wizard = None
+                sess.touch()
+                return event.plain_result("账单已确认：{} 金额{}，分类负债，账户{}。发 /发布 提交。".format(
+                    sess.meta.get("title"), sess.meta.get("amount"), sess.meta.get("account")))
+            if text and 1 <= len(text.strip()) <= 10:
+                sess.meta["account"] = text.strip()
+                sess.wizard = None
+                sess.touch()
+                return event.plain_result("账单已确认：{} 金额{}，分类负债，账户{}。发 /发布 提交。".format(
+                    sess.meta.get("title"), sess.meta.get("amount"), sess.meta.get("account")))
+            return event.plain_result("请选择还款账户：\n" + format_choices("还款到哪个账户？", BILL_WIZARD_LIABILITY_ACCOUNTS, with_skip_cancel=False))
+
+        # ---- 足迹确认（轻量，已禁用强制向导，仅保留显式触发） ----
+        if step == "place_confirm":
+            choice = parse_choice(text, 2)
+            if choice == 1:
+                sess.wizard = None
+                sess.touch()
+                return event.plain_result("已确认坐标。可以发照片后 /发布。")
+            if choice == 2 or text.strip() in ("不对", "重说", "不对，我重说"):
+                sess.wizard = None
+                sess.touch()
+                return event.plain_result("请重新发 /足迹 省 地点 体验 修正地址。已取消当前足迹会话。")
+            return event.plain_result(format_choices("是否正确？", ["正确", "不对，我重说"], with_skip_cancel=False))
+
+        return None
+
     # ---------- 其他 ----------
 
     def _help_text(self) -> str:
@@ -2123,19 +2562,17 @@ class BlogWriter(Star):
             "/动态 内容 #标签\n"
             "　可发图片、GIF、视频\n"
             "/笔记 [分类] 标题\n"
-            "　正文随后发，自动拼接\n"
+            "　空参会让你选笔记本/输标题\n"
             "/足迹 省 地点 体验\n"
-            "　坐标自动获取，可发照片\n"
+            "　会校验坐标让你确认\n"
             "/友链\n"
             "　逐行发：名称/描述/链接/头像\n"
             "/相册 相册名\n"
-            "　直接发图，已有相册自动追加\n"
+            "　空参会列出相册让你选或新建\n"
             "\n"
             "———— 💰 记生活 ————\n"
             "/账单 午餐微信花了32\n"
-            "　自动识别支出/收入/负债\n"
-            "　如：发工资12000、花呗借款5000\n"
-            "　首词可指定：支出/收入/负债\n"
+            "　会让你确认类型/分类/账户\n"
             "/日程 明天3点在A开会 每周\n"
             "　支持优先级、提前15分钟提醒\n"
             "/生日 我的农历8.24\n"
@@ -2144,9 +2581,7 @@ class BlogWriter(Star):
             "　格式：标题 日期 @人物\n"
             "/影视 侏罗纪世界\n"
             "　封面自动从 TMDB 获取\n"
-            "　搜不到会转手动模式（自己发图）\n"
-            "　可自己发图替换封面\n"
-            "　随后可发：评分 8、#标签、影评\n"
+            "　搜不到会让你选类型/评分/标签\n"
             "/书籍 认知觉醒\n"
             "　封面自己发一张，评分/标签/书评\n"
             "/导航 https://example.com\n"

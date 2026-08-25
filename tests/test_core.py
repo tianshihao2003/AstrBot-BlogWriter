@@ -905,5 +905,44 @@ class TestDaohang(unittest.TestCase):
         self.assertNotIn("color:", md2)
 
 
+class TestWizard(unittest.TestCase):
+    def test_parse_choice(self):
+        from blog_writer_core import parse_choice
+
+        self.assertEqual(parse_choice("1", 5), 1)
+        self.assertEqual(parse_choice("3.", 5), 3)
+        self.assertEqual(parse_choice("2、", 5), 2)
+        self.assertEqual(parse_choice("  4  ", 5), 4)
+        self.assertEqual(parse_choice("2 xxx", 5), 2)
+        self.assertIsNone(parse_choice("0", 5))
+        self.assertIsNone(parse_choice("6", 5))
+        self.assertIsNone(parse_choice("abc", 5))
+        self.assertIsNone(parse_choice("", 5))
+
+    def test_format_choices(self):
+        from blog_writer_core import format_choices
+
+        t = format_choices("请选择：", ["a", "b"], extra=["新建"])
+        self.assertIn("1. a", t)
+        self.assertIn("3. 新建", t)
+        self.assertIn("回复数字选择", t)
+
+    def test_wizard_cancel_skip(self):
+        from blog_writer_core import is_wizard_cancel, is_wizard_skip
+
+        self.assertTrue(is_wizard_cancel("取消"))
+        self.assertTrue(is_wizard_cancel("q"))
+        self.assertTrue(is_wizard_skip("跳过"))
+        self.assertFalse(is_wizard_cancel("1"))
+
+    def test_session_wizard_field(self):
+        from blog_writer_core import Session
+
+        s = Session("note", {"title": "t"})
+        self.assertIsNone(s.wizard)
+        s.wizard = {"step": "note_pick_notebook"}
+        self.assertEqual(s.wizard["step"], "note_pick_notebook")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -896,6 +896,72 @@ def next_friend_index(existing_names: List[str]) -> int:
     return max_index + 1
 
 
+# ---------- 向导常量 ----------
+
+WIZARD_CANCEL_KEYWORDS = ("取消", "cancel", "退出", "exit", "q")
+WIZARD_SKIP_KEYWORDS = ("跳过", "skip", "无", "不要", "none")
+WIZARD_NEW_KEYWORDS = ("新建", "new", "创建")
+
+MEDIA_WIZARD_CATEGORIES = [
+    ("电影", "movie"),
+    ("电视剧", "tv"),
+    ("动漫", "anime"),
+    ("纪录片", "documentary"),
+    ("游戏", "game"),
+]
+BILL_WIZARD_LIABILITY_ACCOUNTS = ["花呗", "白条", "信用卡", "京东白条", "抖音月付", "微信分付"]
+
+
+def is_wizard_cancel(text: str) -> bool:
+    t = (text or "").strip().lower()
+    return t in WIZARD_CANCEL_KEYWORDS
+
+
+def is_wizard_skip(text: str) -> bool:
+    t = (text or "").strip().lower()
+    return t in WIZARD_SKIP_KEYWORDS
+
+
+def is_wizard_new(text: str) -> bool:
+    t = (text or "").strip().lower()
+    return t in WIZARD_NEW_KEYWORDS
+
+
+def parse_choice(text: str, n: int) -> Optional[int]:
+    """解析数字选择 1..n，支持 '1' / '1.' / '1、'。非数字返回 None。"""
+    t = (text or "").strip()
+    if not t:
+        return None
+    m = re.match(r"^(\d+)\s*[.、.]?\s*$", t)
+    if not m:
+        m2 = re.match(r"^(\d+)\b", t)
+        if not m2:
+            return None
+        m = m2
+    try:
+        v = int(m.group(1))
+    except ValueError:
+        return None
+    if 1 <= v <= n:
+        return v
+    return None
+
+
+def format_choices(title: str, items: List[str], extra: Optional[List[str]] = None, with_skip_cancel: bool = True) -> str:
+    """生成编号选择文本。items 为选项列表，extra 追加到末尾（如 ['新建笔记本']）。"""
+    lines = [title]
+    for idx, item in enumerate(items, 1):
+        lines.append(f"{idx}. {item}")
+    if extra:
+        start = len(items) + 1
+        for j, e in enumerate(extra):
+            lines.append(f"{start + j}. {e}")
+    if with_skip_cancel:
+        lines.append("")
+        lines.append("回复数字选择，回复“取消”退出" + ("、“跳过”跳过" if with_skip_cancel else ""))
+    return "\n".join(lines)
+
+
 # ---------- 会话 ----------
 
 class Session:
@@ -910,6 +976,7 @@ class Session:
         self.text_parts: List[str] = []
         # 元素为 (来源引用, 图片字节)。图片在收到消息时立即读取，避免临时文件被清理。
         self.images: List[Tuple[str, bytes]] = []
+        self.wizard: Optional[Dict[str, Any]] = None  # 向导状态 {step, data}
         self.created_at = created_at or now_shanghai()
         self.last_active = self.created_at
 

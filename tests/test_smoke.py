@@ -954,14 +954,20 @@ class TestBillSchedule(unittest.TestCase):
             self.assertTrue(any("手动模式" in r for r in replies))
             sess = self.plugin._sessions.get("u1")
             self.assertEqual(sess.meta.get("title"), "冷门老片")
-            # 改名称与类型
-            asyncio.get_event_loop().run_until_complete(self._send("名称: 正确片名\n类型: 剧集"))
+            # 改名称与类型（向导下兼容 名称:/类型: 文本）
+            asyncio.get_event_loop().run_until_complete(self._send("名称: 正确片名"))
             self.assertEqual(sess.meta.get("title"), "正确片名")
-            self.assertEqual(sess.meta.get("subcategory"), "tv")
-            # 发封面后发布
+            # 发封面后需通过向导选类型
             msgs, tmp = self._make_image_msg("media.png")
             try:
                 asyncio.get_event_loop().run_until_complete(self._send("", messages=msgs))
+                sess2 = self.plugin._sessions.get("u1")
+                # 发图后进入类型选择向导，选 2 = 电视剧 tv
+                replies = asyncio.get_event_loop().run_until_complete(self._send("2"))
+                self.assertTrue(any("评分" in r or "类型" in r for r in replies))
+                # 跳过评分标签
+                asyncio.get_event_loop().run_until_complete(self._send("跳过"))
+                asyncio.get_event_loop().run_until_complete(self._send("跳过"))
                 replies = asyncio.get_event_loop().run_until_complete(self._send("/发布"))
                 self.assertTrue(any("发布成功" in r for r in replies))
                 path, md = self.plugin.committed[0]
@@ -1319,6 +1325,132 @@ class TestReminder(unittest.TestCase):
         new_plugin = Stubbed2(context=types.SimpleNamespace(), config=dict(self.config))
         # 新实例应已加载持久化条目
         self.assertTrue(any("恢复测试" in str(r) for r in getattr(new_plugin, "_reminders", [])) or len(getattr(new_plugin, "_reminders", [])) >= 1)
+
+
+class TestWizardFlow(unittest.TestCase):
+    """向导冒烟：空参进向导→数字选择→完成"""
+
+    def setUp(self):
+        self.config = {
+            "github_token": "tok",
+            "github_repo": "tianshihao2003/dumplingandcakeblog",
+            "github_branch": "main",
+            "allow_users": ["u1"],
+            "default_note_dir": "日常随笔",
+        }
+        import main as plugin_main
+
+        class Stubbed(plugin_main.BlogWriter):
+            async def _upload_images(self, stored, folder=""):
+                self.last_upload_folder = folder
+                return ["https://img.tsh520.cn/file/" + os.path.basename(ref) for ref, _ in stored]
+
+            async def _commit_md(self, path, md, now):
+                self.committed.append((path, md))
+                return True, path, ""
+
+            async def _album_index(self, repo, branch, token):
+                return self.album_index_result
+
+            async def _list_notebook_names(self, repo, branch, token):
+                return ["日常随笔", "喜马拉雅"]
+
+            async def _geocode(self, address):
+                return (34.477, 110.084)
+
+            async def terminate(self):
+                pass
+
+        self.plugin = Stubbed(context=types.SimpleNamespace(), config=dict(self.config))
+        self.plugin.committed = []
+        self.plugin.album_index_result = {"titles": {"情侣头像": "blog/album/情侣头像"}, "files": {"2026-spring.md": "blog/album/情侣头像"}}
+        import main as pm
+        self.pm = pm
+
+    async def _send(self, text, sender="u1"):
+        import types as _types
+        ev = _types.SimpleNamespace(
+            message_str=text,
+            get_sender_id=lambda: sender,
+            get_sender_name=lambda: "用户",
+            get_messages=lambda: [],
+            plain_result=lambda t: _types.SimpleNamespace(text=t),
+            message_obj=_types.SimpleNamespace(raw_message={}),
+        )
+        out = []
+        async for r in self.plugin.on_message(ev):
+            out.append(r)
+        return [o.text for o in out]
+
+    def test_note_wizard_pick_and_title(self):
+        # /笔记 空参 → 选笔记本 → 输标题 → 发正文 → 发布
+        replies = asyncio.get_event_loop().run_until_complete(self._send("/笔记"))
+        self.assertTrue(any("请选择笔记本" in r for r in replies))
+        replies = asyncio.get_event_loop().run_until_complete(self._send("1"))
+        self.assertTrue(any("标题" in r for r in replies))
+        replies = asyncio.get_event_loop().run_until_complete(self._send("我的新标题"))
+        self.assertTrue(any("笔记已创建" in r for r in replies))
+        sess = self.plugin._sessions.get("u1")
+        self.assertEqual(sess.meta.get("note_dir"), "日常随笔")
+        self.assertEqual(sess.meta.get("title"), "我的新标题")
+
+    def test_note_wizard_cancel(self):
+        asyncio.get_event_loop().run_until_complete(self._send("/笔记"))
+        replies = asyncio.get_event_loop().run_until_complete(self._send("取消"))
+        self.assertTrue(any("已取消" in r for r in replies))
+        self.assertNotIn("u1", self.plugin._sessions)
+
+    def test_album_wizard_pick_existing(self):
+        replies = asyncio.get_event_loop().run_until_complete(self._send("/相册"))
+        self.assertTrue(any("请选择相册" in r or "相册" in r for r in replies))
+        # display is like "情侣头像（2026-spring.md）" sorted, first item choice test just checks session created
+        replies = asyncio.get_event_loop().run_until_complete(self._send("1"))
+        sess = self.plugin._sessions.get("u1")
+        self.assertIsNotNone(sess)
+        self.assertTrue(sess.meta.get("name"))  # 选中任一相册即可
+
+    def test_bill_wizard_confirm_type(self):
+        replies = asyncio.get_event_loop().run_until_complete(self._send("/账单 午餐30"))
+        self.assertTrue(any("请确认类型" in r for r in replies))
+        replies = asyncio.get_event_loop().run_until_complete(self._send("1"))
+        self.assertTrue(any("分类" in r for r in replies))
+        replies = asyncio.get_event_loop().run_until_complete(self._send("1"))
+        self.assertTrue(any("账户" in r for r in replies))
+        replies = asyncio.get_event_loop().run_until_complete(self._send("1"))
+        self.assertTrue(any("已确认" in r for r in replies))
+        sess = self.plugin._sessions.get("u1")
+        self.assertEqual(sess.meta.get("type"), "expense")
+        self.assertEqual(sess.meta.get("category"), "餐饮")
+
+    def test_bill_wizard_repay(self):
+        asyncio.get_event_loop().run_until_complete(self._send("/账单 花呗还款200"))
+        asyncio.get_event_loop().run_until_complete(self._send("4"))
+        replies = asyncio.get_event_loop().run_until_complete(self._send("1"))
+        sess = self.plugin._sessions.get("u1")
+        self.assertEqual(sess.meta.get("account"), "花呗")
+        self.assertEqual(sess.meta.get("amount"), -200)
+
+    def test_media_wizard_category(self):
+        # 模拟手动模式已发图后进入选类型
+        from blog_writer_core import Session
+        sess = Session("media", {"title": "测试片", "subcategory": "", "manual": True})
+        sess.wizard = {"step": "media_pick_category"}
+        self.plugin._sessions["u1"] = sess
+        replies = asyncio.get_event_loop().run_until_complete(self._send("1"))
+        self.assertTrue(any("评分" in r for r in replies))
+        self.assertEqual(sess.meta.get("subcategory"), "movie")
+        replies = asyncio.get_event_loop().run_until_complete(self._send("8"))
+        self.assertTrue(any("标签" in r for r in replies))
+        self.assertEqual(sess.meta.get("score"), 8)
+        replies = asyncio.get_event_loop().run_until_complete(self._send("#科幻"))
+        sess2 = self.plugin._sessions.get("u1")
+        self.assertIn("科幻", sess2.meta.get("tags", []))
+
+    def test_fast_track_still_works(self):
+        # 带参快车道不受影响
+        replies = asyncio.get_event_loop().run_until_complete(self._send("/笔记 日常随笔 快捷标题"))
+        self.assertTrue(any("笔记已创建" in r for r in replies))
+        self.assertIsNone(self.plugin._sessions["u1"].wizard)
 
 
 if __name__ == "__main__":
