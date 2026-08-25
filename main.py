@@ -2255,6 +2255,9 @@ class BlogWriter(Star):
             return None
         step = sess.wizard.get("step", "")
         text = (raw or "").strip()
+        # 空消息（微信心跳/系统事件）直接放行，不回复，避免刷屏
+        if not text:
+            return None
 
         # 通用取消
         if is_wizard_cancel(text):
