@@ -6,6 +6,7 @@ BlogWriter 纯逻辑核心：命令解析、markdown 生成、请求构造、响
 
 import base64
 import json
+import mimetypes
 import re
 import time
 from datetime import datetime, timedelta, timezone
@@ -359,13 +360,34 @@ def parse_github_put_response(status: int, body: str) -> Tuple[bool, str]:
 
 # ---------- 图床 ----------
 
+_MIME_MAP = {
+    "webp": "image/webp",
+    "heic": "image/heic",
+    "heif": "image/heif",
+    "ico": "image/x-icon",
+    "svg": "image/svg+xml",
+    "m4v": "video/x-m4v",
+    "mov": "video/quicktime",
+}
+
+
+def _mime_for_filename(name: str) -> str:
+    ext = (name.rsplit(".", 1)[-1].lower() if "." in name else "")
+    if ext in _MIME_MAP:
+        return _MIME_MAP[ext]
+    guessed, _ = mimetypes.guess_type(name)
+    if guessed and (guessed.startswith("image/") or guessed.startswith("video/")):
+        return guessed
+    return "image/jpeg"
+
+
 def build_imgbed_upload(url: str, filename: str, data: bytes) -> Dict[str, Any]:
     """构造 multipart 上传请求（手写 boundary，不依赖 requests）。"""
     boundary = "----BlogWriterBoundary" + str(int(time.time() * 1000))
     lines = []
     lines.append("--" + boundary)
     lines.append('Content-Disposition: form-data; name="file"; filename="{}"'.format(filename))
-    lines.append("Content-Type: application/octet-stream")
+    lines.append("Content-Type: {}".format(_mime_for_filename(filename)))
     lines.append("")
     body = ("\r\n".join(lines)).encode("utf-8") + b"\r\n" + data + b"\r\n"
     body += ("--" + boundary + "--\r\n").encode("utf-8")

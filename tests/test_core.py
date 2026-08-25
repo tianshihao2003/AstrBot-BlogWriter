@@ -308,8 +308,29 @@ class TestRequests(unittest.TestCase):
         req = build_imgbed_upload("https://img.tsh520.cn/file", "a.png", b"1234")
         self.assertIn("multipart/form-data; boundary=", req["headers"]["Content-Type"])
         self.assertIn(b'name="file"; filename="a.png"', req["body"])
+        self.assertIn(b"Content-Type: image/png", req["body"])
+        self.assertNotIn(b"application/octet-stream", req["body"])
         self.assertTrue(req["body"].endswith(b"--\r\n") or req["body"].endswith(b"--"))
         self.assertIn(b"1234", req["body"])
+
+    def test_imgbed_upload_mime_by_extension(self):
+        from blog_writer_core import build_imgbed_upload as _build
+
+        self.assertIn(b"Content-Type: image/jpeg", _build("https://img.tsh520.cn/upload", "photo.jpg", b"x")["body"])
+        self.assertIn(b"Content-Type: image/jpeg", _build("https://img.tsh520.cn/upload", "photo.JPEG", b"x")["body"])
+        self.assertIn(b"Content-Type: image/png", _build("https://img.tsh520.cn/upload", "a.png", b"x")["body"])
+        self.assertIn(b"Content-Type: image/webp", _build("https://img.tsh520.cn/upload", "x.webp", b"x")["body"])
+        self.assertIn(b"Content-Type: image/gif", _build("https://img.tsh520.cn/upload", "a.gif", b"x")["body"])
+        self.assertIn(b"Content-Type: image/heic", _build("https://img.tsh520.cn/upload", "a.heic", b"x")["body"])
+        self.assertIn(b"Content-Type: image/svg+xml", _build("https://img.tsh520.cn/upload", "a.svg", b"x")["body"])
+        self.assertIn(b"Content-Type: image/x-icon", _build("https://img.tsh520.cn/upload", "a.ico", b"x")["body"])
+        self.assertIn(b"Content-Type: video/mp4", _build("https://img.tsh520.cn/upload", "v.mp4", b"x")["body"])
+        self.assertIn(b"Content-Type: video/quicktime", _build("https://img.tsh520.cn/upload", "v.mov", b"x")["body"])
+        self.assertIn(b"Content-Type: video/x-m4v", _build("https://img.tsh520.cn/upload", "v.m4v", b"x")["body"])
+        self.assertIn(b"Content-Type: video/webm", _build("https://img.tsh520.cn/upload", "v.webm", b"x")["body"])
+        # 无扩展名/未知扩展名兜底 image/jpeg
+        self.assertIn(b"Content-Type: image/jpeg", _build("https://img.tsh520.cn/upload", "noext", b"x")["body"])
+        self.assertIn(b"Content-Type: image/jpeg", _build("https://img.tsh520.cn/upload", "file.unknown123", b"x")["body"])
 
     def test_imgbed_response(self):
         # 新版数组格式（官方文档 src/api/upload.md）：优先取 src（规范路径）
