@@ -233,7 +233,17 @@ class TestMarkdown(unittest.TestCase):
             self.assertEqual(fm["name"], "标题")
             # js-yaml（Astro 用）会把 2026-08-08 当字符串；PyYAML 会解析成 date 对象，两者皆可
             self.assertTrue(fm["date"] == "2026-08-08" or fm["date"] == datetime(2026, 8, 8).date())
+            self.assertNotIn("images", fm)
         self.assertIn("正文第一行\n第二行", md)
+        self.assertNotIn("![]", md)
+
+    def test_note_md_with_images(self):
+        md = build_note_md("标题", "正文", ["https://img.tsh520.cn/file/a.jpg", "https://img.tsh520.cn/file/b.jpg"], datetime(2026, 8, 8))
+        if yaml:
+            fm = yaml.safe_load(md.split("---")[1])
+            self.assertEqual(fm["images"], ["https://img.tsh520.cn/file/a.jpg", "https://img.tsh520.cn/file/b.jpg"])
+        self.assertIn("  - https://img.tsh520.cn/file/a.jpg", md)
+        self.assertNotIn("![", md)
 
     def test_place_md(self):
         md = build_place_md("陕西", "华阴市华山", "去找宝宝了", ["https://img.tsh520.cn/file/places/x.jpg"], 34.477861, 110.084789, ["旅游"], datetime(2026, 8, 8))

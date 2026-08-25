@@ -260,11 +260,12 @@ def build_moment_md(
 
 
 def build_note_md(name: str, content: str, image_urls: List[str], day: datetime = None) -> str:
+    """对齐最新 notebooks 格式（2026-09-27）：图片进 frontmatter images 数组，正文只留文字，对齐 moments。"""
     day = day or now_shanghai()
-    fm = {"date": day.strftime("%Y-%m-%d"), "name": name}
+    fm: Dict[str, Any] = {"date": day.strftime("%Y-%m-%d"), "name": name}
+    if image_urls:
+        fm["images"] = list(image_urls)
     body = content.strip()
-    for url in image_urls:
-        body = body + "\n\n![{}]({})".format(_image_alt(url), url)
     return _dump_yaml(fm) + "\n\n" + body + "\n"
 
 
