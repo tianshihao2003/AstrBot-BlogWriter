@@ -1,9 +1,10 @@
 name: astrbot_plugin_blog_writer # 插件唯一识别名
 display_name: BlogWriter
-desc: 通过微信对话更新博客的动态、笔记、足迹、相册、友链、账单、日程，图片自动上传图床并提交 GitHub 触发部署，支持日程微信提醒
+desc: 通过微信/QQ对话更新博客的动态、笔记、足迹、相册、友链、账单（支持信用购一键拆两笔）、日程，交互式向导防填错，图片自动上传图床并提交 GitHub 触发部署，支持日程提醒
 version: v1.0.0
 author: tianshihao2003
 repo: https://github.com/tianshihao2003/AstrBot-BlogWriter
 support_platforms:
   - weixin_oc
+  - aiocqhttp
 astrbot_version: ">=4.22.0"

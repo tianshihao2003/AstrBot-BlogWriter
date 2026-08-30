@@ -596,9 +596,10 @@ def build_bangumi_md(
     category: str = "anime",
     now: datetime = None,
 ) -> str:
-    """生成影视/书籍条目 md，对齐博客 bangumi 格式：
+    """生成影视/书籍/游戏条目 md，对齐博客 bangumi 格式：
     title/name_cn/category/subcategory/status/image/score/tags/published + 评论正文。
-    影视：category=anime + subcategory(movie/tv)，放 anime/ 子目录（对齐现有数据）；
+    影视：category=anime + subcategory(movie/tv/anime/documentary)，放 anime/ 子目录（对齐现有数据）；
+    游戏：category=game、无 subcategory，放 game/ 子目录（对齐现有 game/ 条目）；
     书籍：category=book、无 subcategory，放 book/ 根目录（手动书籍，区别于 weread 同步的分类子目录）。
     """
     now = now or now_shanghai()
@@ -606,7 +607,7 @@ def build_bangumi_md(
     if name_cn and name_cn != title:
         fm["name_cn"] = name_cn
     fm["category"] = category if category in ("anime", "book", "music", "game", "real") else "anime"
-    if subcategory in ("movie", "tv"):
+    if subcategory in ("movie", "tv", "anime", "documentary"):
         fm["subcategory"] = subcategory
     fm["status"] = 2  # 看过
     fm["image"] = image_url
@@ -929,11 +930,11 @@ def is_wizard_new(text: str) -> bool:
 
 
 def parse_choice(text: str, n: int) -> Optional[int]:
-    """解析数字选择 1..n，支持 '1' / '1.' / '1、'。非数字返回 None。"""
+    """解析数字选择 1..n，支持 '1' / '1.' / '1、' / '1。'。非数字返回 None。"""
     t = (text or "").strip()
     if not t:
         return None
-    m = re.match(r"^(\d+)\s*[.、.]?\s*$", t)
+    m = re.match(r"^(\d+)\s*[.、。]?\s*$", t)
     if not m:
         m2 = re.match(r"^(\d+)\b", t)
         if not m2:

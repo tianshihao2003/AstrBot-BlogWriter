@@ -123,53 +123,6 @@ def _install_astrbot_stub():
 _install_astrbot_stub()
 
 
-class FakeBlogWriter:
-    """真实 BlogWriter 的替身：stub 网络 IO，只验证消息流与产物。"""
-
-    def __init__(self, plugin_cls, config):
-        self.plugin = plugin_cls(Context=types.SimpleNamespace(), config=config)
-        self.plugin.config = config
-        self.committed = []
-
-    async def _upload_images(self, refs):
-        return ["https://img.tsh520.cn/file/" + os.path.basename(r) for r in refs]
-
-    async def _geocode(self, address):
-        return (34.477861, 110.084789)
-
-    async def _commit_md(self, path, md, now):
-        self.committed.append((path, md))
-        return True, path, ""
-
-    async def run(self, event):
-        results = []
-        async for r in self.plugin.on_message(event):
-            results.append(r)
-        return results
-
-    def feed(self, text="", messages=None, sender="u1"):
-        ev = types.SimpleNamespace(
-            message_str=text,
-            get_sender_id=lambda: sender,
-            get_messages=lambda: messages or [],
-            plain_result=lambda t: types.SimpleNamespace(text=t),
-        )
-        return self.run(ev)
-
-
-async def _drive(plugin, text, messages=None):
-    ev = types.SimpleNamespace(
-        message_str=text,
-        get_sender_id=lambda: "u1",
-        get_messages=lambda: messages or [],
-        plain_result=lambda t: types.SimpleNamespace(text=t),
-    )
-    out = []
-    async for r in plugin.plugin.on_message(ev):
-        out.append(r)
-    return [o.text for o in out]
-
-
 class TestFlow(unittest.TestCase):
     def setUp(self):
         self.config = {
@@ -1367,13 +1320,13 @@ class TestWizardFlow(unittest.TestCase):
         import main as pm
         self.pm = pm
 
-    async def _send(self, text, sender="u1"):
+    async def _send(self, text, sender="u1", messages=None):
         import types as _types
         ev = _types.SimpleNamespace(
             message_str=text,
             get_sender_id=lambda: sender,
             get_sender_name=lambda: "用户",
-            get_messages=lambda: [],
+            get_messages=lambda: messages or [],
             plain_result=lambda t: _types.SimpleNamespace(text=t),
             message_obj=_types.SimpleNamespace(raw_message={}),
         )
@@ -1401,19 +1354,27 @@ class TestWizardFlow(unittest.TestCase):
         self.assertNotIn("u1", self.plugin._sessions)
 
     def test_album_wizard_pick_existing(self):
+        self.plugin.album_index_result = {
+            "titles": {"武侠风": "blog/album/武侠风", "情侣头像": "blog/album/情侣头像"},
+            "files": {"wuxia.md": "blog/album/武侠风", "2026-spring.md": "blog/album/情侣头像"},
+            # entries 顺序故意与字母序不同：验证展示与映射同源排序，选 1 必须是“情侣头像”
+            "entries": [
+                ("武侠风", "wuxia.md", "blog/album/武侠风"),
+                ("情侣头像", "2026-spring.md", "blog/album/情侣头像"),
+            ],
+        }
         replies = asyncio.get_event_loop().run_until_complete(self._send("/相册"))
-        self.assertTrue(any("请选择相册" in r or "相册" in r for r in replies))
-        # display is like "情侣头像（2026-spring.md）" sorted, first item choice test just checks session created
+        self.assertTrue(any("请选择相册" in r for r in replies))
         replies = asyncio.get_event_loop().run_until_complete(self._send("1"))
         sess = self.plugin._sessions.get("u1")
         self.assertIsNotNone(sess)
-        self.assertTrue(sess.meta.get("name"))  # 选中任一相册即可
+        # 排序后第 1 项是 情侣头像（回归：展示与映射必须同源，防选项错位）
+        self.assertEqual(sess.meta.get("name"), "情侣头像")
 
     def test_bill_wizard_confirm_type(self):
         replies = asyncio.get_event_loop().run_until_complete(self._send("/账单 午餐30"))
         self.assertTrue(any("请确认类型" in r for r in replies))
-        replies = asyncio.get_event_loop().run_until_complete(self._send("1"))
-        self.assertTrue(any("分类" in r for r in replies))
+        # 选 1 支出：分类已识别（餐饮）→ 跳过分类，账户未知 → 问账户
         replies = asyncio.get_event_loop().run_until_complete(self._send("1"))
         self.assertTrue(any("账户" in r for r in replies))
         replies = asyncio.get_event_loop().run_until_complete(self._send("1"))
@@ -1421,14 +1382,130 @@ class TestWizardFlow(unittest.TestCase):
         sess = self.plugin._sessions.get("u1")
         self.assertEqual(sess.meta.get("type"), "expense")
         self.assertEqual(sess.meta.get("category"), "餐饮")
+        self.assertEqual(sess.meta.get("account"), "微信")
 
-    def test_bill_wizard_repay(self):
-        asyncio.get_event_loop().run_until_complete(self._send("/账单 花呗还款200"))
-        asyncio.get_event_loop().run_until_complete(self._send("4"))
+    def test_bill_wizard_skip_known_fields(self):
+        # 类型/分类/账户全识别 → 选 1 后直接确认，不再追问
+        replies = asyncio.get_event_loop().run_until_complete(self._send("/账单 今天午餐微信花了32"))
+        self.assertTrue(any("请确认类型" in r for r in replies))
         replies = asyncio.get_event_loop().run_until_complete(self._send("1"))
+        self.assertTrue(any("已确认" in r for r in replies))
+        self.assertFalse(any("请选择" in r for r in replies))
+
+    def test_bill_wizard_repay_skip_account(self):
+        # 还款且账户已识别（花呗）→ 选 4 直接确认，不再追问账户
+        asyncio.get_event_loop().run_until_complete(self._send("/账单 花呗还款200"))
+        replies = asyncio.get_event_loop().run_until_complete(self._send("4"))
+        self.assertTrue(any("已确认" in r for r in replies))
         sess = self.plugin._sessions.get("u1")
         self.assertEqual(sess.meta.get("account"), "花呗")
         self.assertEqual(sess.meta.get("amount"), -200)
+
+    def test_bill_empty_session_then_text_enters_wizard(self):
+        # /账单 空会话 → 补发内容 → 也应进入类型确认向导（与带参路径统一）
+        asyncio.get_event_loop().run_until_complete(self._send("/账单"))
+        replies = asyncio.get_event_loop().run_until_complete(self._send("午餐30"))
+        self.assertTrue(any("请确认类型" in r for r in replies))
+        sess = self.plugin._sessions.get("u1")
+        self.assertEqual(sess.meta.get("amount"), -30)
+
+    def test_bill_credit_fast_track_publish(self):
+        # 信用购快车道：一句话 → 发布拆两笔（支出-30 花呗 + 负债+30 花呗）
+        replies = asyncio.get_event_loop().run_until_complete(self._send("/账单 信用购 花呗 午餐30"))
+        self.assertTrue(any("信用购已确认" in r for r in replies))
+        replies = asyncio.get_event_loop().run_until_complete(self._send("/发布"))
+        self.assertTrue(any("信用购发布成功" in r for r in replies))
+        self.assertEqual(len(self.plugin.committed), 2)
+        paths = [p for p, _md in self.plugin.committed]
+        self.assertTrue(any("午餐" in p for p in paths))
+        self.assertTrue(any("花呗消费" in p for p in paths))
+        expense_md = next(md for p, md in self.plugin.committed if "午餐" in p)
+        liability_md = next(md for p, md in self.plugin.committed if "花呗消费" in p)
+        self.assertIn("amount: -30", expense_md)
+        self.assertIn('account: "花呗"', expense_md)
+        self.assertIn("amount: 30", liability_md)
+        self.assertIn('type: "liability"', liability_md)
+        self.assertIn('category: "负债"', liability_md)
+
+    def test_bill_credit_via_wizard(self):
+        # 向导选 7 信用购 → 问账户 → 回花呗 → 发布拆两笔
+        asyncio.get_event_loop().run_until_complete(self._send("/账单 午餐30"))
+        replies = asyncio.get_event_loop().run_until_complete(self._send("7"))
+        self.assertTrue(any("信用账户" in r for r in replies))
+        replies = asyncio.get_event_loop().run_until_complete(self._send("花呗"))
+        self.assertTrue(any("信用购已确认" in r for r in replies))
+        replies = asyncio.get_event_loop().run_until_complete(self._send("/发布"))
+        self.assertTrue(any("信用购发布成功" in r for r in replies))
+        self.assertEqual(len(self.plugin.committed), 2)
+
+    def test_bill_wizard_reinput(self):
+        # 选 6 重说 → 重新发内容 → 回到类型确认
+        asyncio.get_event_loop().run_until_complete(self._send("/账单 午餐30"))
+        replies = asyncio.get_event_loop().run_until_complete(self._send("6"))
+        self.assertTrue(any("重新发送账单内容" in r for r in replies))
+        replies = asyncio.get_event_loop().run_until_complete(self._send("发工资5000 银行卡"))
+        self.assertTrue(any("已重新识别" in r for r in replies))
+        self.assertTrue(any("请确认类型" in r for r in replies))
+        sess = self.plugin._sessions.get("u1")
+        self.assertEqual(sess.meta.get("type"), "income")
+        self.assertEqual(sess.meta.get("amount"), 5000)
+
+    def test_media_wizard_game_publish(self):
+        # 影视向导选 5 游戏 → 发布到 bangumi/game/，category game、无 subcategory
+        from blog_writer_core import Session
+        sess = Session("media", {"title": "星露谷物语", "subcategory": "", "manual": True})
+        sess.wizard = {"step": "media_pick_category"}
+        self.plugin._sessions["u1"] = sess
+        from astrbot.api.message_components import Image
+        from pathlib import Path
+        tmp = Path(os.environ.get("TEMP", ".")) / "blogwriter_game.png"
+        tmp.write_bytes(b"fake")
+        try:
+            asyncio.get_event_loop().run_until_complete(self._send("", messages=[Image(file=str(tmp))]))
+            asyncio.get_event_loop().run_until_complete(self._send("5"))
+            asyncio.get_event_loop().run_until_complete(self._send("跳过"))
+            asyncio.get_event_loop().run_until_complete(self._send("跳过"))
+            replies = asyncio.get_event_loop().run_until_complete(self._send("/发布"))
+            self.assertTrue(any("发布成功" in r for r in replies))
+            path, md = self.plugin.committed[0]
+            self.assertTrue(path.startswith("src/content/bangumi/game/"))
+            self.assertIn("category: game", md)
+            self.assertNotIn("subcategory", md)
+        finally:
+            tmp.unlink(missing_ok=True)
+
+    def test_media_wizard_anime_subcategory(self):
+        # 影视向导选 3 动漫 → subcategory: anime 写入（schema 允许）
+        from blog_writer_core import Session
+        sess = Session("media", {"title": "测试动漫", "subcategory": "", "manual": True})
+        sess.wizard = {"step": "media_pick_category"}
+        self.plugin._sessions["u1"] = sess
+        replies = asyncio.get_event_loop().run_until_complete(self._send("3"))
+        self.assertTrue(any("评分" in r for r in replies))
+        asyncio.get_event_loop().run_until_complete(self._send("跳过"))
+        asyncio.get_event_loop().run_until_complete(self._send("跳过"))
+        from astrbot.api.message_components import Image
+        from pathlib import Path
+        tmp = Path(os.environ.get("TEMP", ".")) / "blogwriter_anime.png"
+        tmp.write_bytes(b"fake")
+        try:
+            asyncio.get_event_loop().run_until_complete(self._send("", messages=[Image(file=str(tmp))]))
+            replies = asyncio.get_event_loop().run_until_complete(self._send("/发布"))
+            self.assertTrue(any("发布成功" in r for r in replies))
+            path, md = self.plugin.committed[0]
+            self.assertTrue(path.startswith("src/content/bangumi/anime/"))
+            self.assertIn("subcategory: anime", md)
+        finally:
+            tmp.unlink(missing_ok=True)
+
+    def test_note_wizard_cleans_dir_name(self):
+        # 笔记向导输入带路径符号的名称 → 存清洗后的名字（防路径注入）
+        asyncio.get_event_loop().run_until_complete(self._send("/笔记"))
+        replies = asyncio.get_event_loop().run_until_complete(self._send("../坏/名字"))
+        self.assertTrue(any("标题" in r for r in replies))
+        sess = self.plugin._sessions.get("u1")
+        self.assertNotIn("..", sess.meta.get("note_dir", ""))
+        self.assertNotIn("/", sess.meta.get("note_dir", ""))
 
     def test_media_wizard_category(self):
         # 模拟手动模式已发图后进入选类型

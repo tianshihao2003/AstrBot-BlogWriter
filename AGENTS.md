@@ -1,8 +1,10 @@
 # AGENTS.md
 
-AstrBot BlogWriter 插件：通过微信（weixin_oc）对话把内容发布到静态博客仓库 `tianshihao2003/dumplingandcakeblog`（Firefly Astro）。内容类型：动态（moments）、笔记（notebooks）、足迹（places）、友链（friends）、相册（album）、账单（bills）、日程（schedules，自然语言正则 + 微信提醒）。流程：图片上传 CloudFlare-ImgBed → 生成 markdown（对齐博客 zod schema）→ GitHub API 提交 main 分支 → Actions 构建 + EdgeOne Pages 部署。
+AstrBot BlogWriter 插件：通过微信（weixin_oc）/ QQ（aiocqhttp）对话把内容发布到静态博客仓库 `tianshihao2003/dumplingandcakeblog`（Firefly Astro）。内容类型：动态（moments）、笔记（notebooks）、足迹（places）、友链（friends）、相册（album）、账单（bills，支持信用购一键拆两笔）、日程（schedules，自然语言正则 + 提醒）。流程：图片上传 CloudFlare-ImgBed → 生成 markdown（对齐博客 zod schema）→ GitHub API 提交 main 分支 → Actions 构建 + EdgeOne Pages 部署。
 
 **2026-08-23 重大变更**：移除全部 AI 自然语言抽取（LLM 调用、`/模型列表` 命令、免命令自然语言识别、`ai_*` 配置项全删），账单/日程只走本地正则；所有内容必须显式用命令创建。同日对齐博客最新文件格式（见「业务规则」各条）。
+
+**2026-08-25 重大变更（v1.0.41-45）**：① 交互式向导（`Session.wizard` 状态机 + core 的 `parse_choice/format_choices/is_wizard_*`）覆盖 /笔记 /相册 /影视 /账单，回数字选择，`取消` 退出、`跳过` 走默认、已识别字段自动跳过不重复问；带参快捷写法全部保留。② 账单新增**信用购**（`/账单 信用购 花呗 午餐30` 或向导选 7）：`/发布` 一次原子写入两笔——支出 `-N`（账户=信用账户）+ 负债 `+N`（title=`{账户}消费`、category 负债），`meta["credit_split"]=True` 标记；批量账单不支持。③ 图床上传按扩展名声明真实 MIME（`_mime_for_filename`，修复 octet-stream 导致浏览器下载）。④ 笔记图片写 frontmatter `images:` 数组（对齐博客 2026-09-27 归档卡片），不再正文 `![](url)`。⑤ 用户输入的笔记本/相册名经 `clean_filename_part` 清洗后才入 meta（防路径注入），`_publish` 笔记分支再兜底清洗一次。⑥ 向导/会话对空消息（`msg_str=''`，QQ 心跳/重试）一律放行不回复（防刷屏）。⑦ 相册向导列表与数字映射必须同源同序（`_album_index` 返回 `entries`，排序后同时派生 display 与 titles——曾因排序不同步导致选 1 拿到别的相册）。⑧ 影视 game 落 `bangumi/game/`（category game 无 subcategory），anime/documentary 写对应 subcategory（`build_bangumi_md` 白名单已扩）。⑨ 提醒 job id 统一 `{user}_{title}_{time}`（restore 与 schedule 同格式）。
 
 先读文档：`DESIGN.md`（已批准的完整设计，含协议与规则）、`README.md`（安装/配置/使用）。
 
