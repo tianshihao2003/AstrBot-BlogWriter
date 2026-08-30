@@ -953,6 +953,17 @@ class TestWizard(unittest.TestCase):
         s.wizard = {"step": "note_pick_notebook"}
         self.assertEqual(s.wizard["step"], "note_pick_notebook")
 
+    def test_build_notebook_index_json(self):
+        import json
+
+        from blog_writer_core import build_notebook_index_json
+
+        md = build_notebook_index_json("全新笔记本")
+        data = json.loads(md)
+        self.assertEqual(data, {"name": "全新笔记本"})
+        # tab 缩进 + 中文不转义（对齐现有 _index.json 风格）
+        self.assertIn("\t\"name\": \"全新笔记本\"", md)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -151,6 +151,9 @@ class TestFlow(unittest.TestCase):
             async def _geocode(self, address):
                 return (34.477861, 110.084789)
 
+            async def _list_notebook_names(self, repo, branch, token):
+                return ["日常随笔"]
+
             async def _commit_md(self, path, md, now):
                 self.committed.append((path, md))
                 return True, path, ""
@@ -1506,6 +1509,56 @@ class TestWizardFlow(unittest.TestCase):
         sess = self.plugin._sessions.get("u1")
         self.assertNotIn("..", sess.meta.get("note_dir", ""))
         self.assertNotIn("/", sess.meta.get("note_dir", ""))
+
+    def test_note_publish_creates_index_for_new_notebook(self):
+        # 全新笔记本发布：先补建 _index.json 再发笔记，成功提示含“已新建笔记本”
+        puts = []
+
+        async def fake_exists(repo, path, branch, token):
+            return False  # 目标不存在 → 允许创建
+
+        async def fake_put(repo, path, md, token, branch):
+            puts.append((path, md))
+            return True, ""
+
+        self.plugin._github_exists = fake_exists
+        self.plugin._github_put = fake_put
+
+        asyncio.get_event_loop().run_until_complete(self._send("/笔记"))
+        asyncio.get_event_loop().run_until_complete(self._send("全新笔记本"))
+        asyncio.get_event_loop().run_until_complete(self._send("标题一"))
+        asyncio.get_event_loop().run_until_complete(self._send("正文内容"))
+        replies = asyncio.get_event_loop().run_until_complete(self._send("/发布"))
+        self.assertTrue(any("发布成功" in r for r in replies))
+        self.assertTrue(any("已新建笔记本" in r for r in replies))
+        # 索引先于笔记提交，路径与内容正确
+        self.assertEqual(len(puts), 1)
+        idx_path, idx_md = puts[0]
+        self.assertEqual(idx_path, "src/content/life/notebooks/全新笔记本/_index.json")
+        self.assertIn("全新笔记本", idx_md)
+        self.assertEqual(len(self.plugin.committed), 1)
+        note_path, note_md = self.plugin.committed[0]
+        self.assertTrue(note_path.startswith("src/content/life/notebooks/全新笔记本/"))
+        self.assertIn("正文内容", note_md)
+
+    def test_note_publish_existing_notebook_no_index(self):
+        # 已有笔记本发布：不补建索引、成功提示不含“已新建笔记本”
+        puts = []
+
+        async def fake_put(repo, path, md, token, branch):
+            puts.append((path, md))
+            return True, ""
+
+        self.plugin._github_put = fake_put
+        asyncio.get_event_loop().run_until_complete(self._send("/笔记"))
+        asyncio.get_event_loop().run_until_complete(self._send("1"))  # 日常随笔（stub 列表已含）
+        asyncio.get_event_loop().run_until_complete(self._send("标题二"))
+        asyncio.get_event_loop().run_until_complete(self._send("正文二"))
+        replies = asyncio.get_event_loop().run_until_complete(self._send("/发布"))
+        self.assertTrue(any("发布成功" in r for r in replies))
+        self.assertFalse(any("已新建笔记本" in r for r in replies))
+        self.assertEqual(len(puts), 0)  # 无索引提交
+        self.assertEqual(len(self.plugin.committed), 1)
 
     def test_media_wizard_category(self):
         # 模拟手动模式已发图后进入选类型

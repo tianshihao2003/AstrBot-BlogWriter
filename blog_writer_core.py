@@ -269,6 +269,12 @@ def build_note_md(name: str, content: str, image_urls: List[str], day: datetime 
     return _dump_yaml(fm) + "\n\n" + body + "\n"
 
 
+def build_notebook_index_json(name: str) -> str:
+    """新建笔记本时生成 _index.json（博客书架/归档页靠它识别笔记本，缺了整个文件夹不可见）。
+    对齐现有文件风格：tab 缩进、中文字符不转义；封面留空由博客显示默认 emoji，用户可后续在 CMS 补。"""
+    return json.dumps({"name": name}, ensure_ascii=False, indent="\t") + "\n"
+
+
 def build_place_md(
     province: str,
     city: str,

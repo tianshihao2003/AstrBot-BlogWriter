@@ -81,6 +81,7 @@ try:
         build_imgbed_upload,
         build_moment_md,
         build_note_md,
+        build_notebook_index_json,
         build_place_md,
         build_schedule_md,
         build_upload_url,
@@ -147,6 +148,7 @@ except ImportError:  # 兼容非包形式加载
         build_imgbed_upload,
         build_moment_md,
         build_note_md,
+        build_notebook_index_json,
         build_place_md,
         build_schedule_md,
         build_upload_url,
@@ -613,8 +615,11 @@ class BlogWriter(Star):
             )
         return base
 
-    async def _list_notebook_names(self, repo: str, branch: str, token: str) -> List[str]:
-        """列出 src/content/life/notebooks 下的一级目录名（笔记本名）。失败回退到默认。"""
+    async def _list_notebook_names(self, repo: str, branch: str, token: str) -> Optional[List[str]]:
+        """列出 src/content/life/notebooks 下的一级目录名（笔记本名）。
+
+        返回排序后的目录名列表；**请求失败返回 None**（区别于空仓库的 []，
+        发布笔记时依赖该区分决定是否补建 _index.json）。"""
         url = "https://api.github.com/repos/{}/contents/src/content/life/notebooks?ref={}".format(
             repo, urllib.parse.quote(branch)
         )
@@ -626,7 +631,7 @@ class BlogWriter(Star):
         try:
             resp = await self._get_client().get(url, headers=headers)
             if resp.status_code != 200:
-                return []
+                return None
             import json as _json
             items = _json.loads(resp.text)
             names = []
@@ -638,7 +643,26 @@ class BlogWriter(Star):
             return sorted(names)
         except Exception as e:
             logger.warning("BlogWriter: 列笔记本失败: %s", e)
-            return []
+            return None
+
+    async def _ensure_notebook_index(self, note_dir: str, repo: str, branch: str, token: str) -> Tuple[bool, str]:
+        """笔记本不存在时补建 _index.json（博客书架/归档页靠它识别，缺了文件夹不可见）。
+
+        返回 (是否新建了索引, 错误信息)。目录列表拉取失败时不动作（返回 False, ""），
+        宁可沿用旧行为也不误判已有笔记本。"""
+        names = await self._list_notebook_names(repo, branch, token)
+        if names is None or note_dir in names:
+            return False, ""
+        idx_path = "src/content/life/notebooks/{}/_index.json".format(note_dir)
+        exists = await self._github_exists(repo, idx_path, branch, token)
+        if exists is not False:  # True（已存在）或 None（查询失败）都不再建
+            return False, ""
+        idx_md = build_notebook_index_json(note_dir)
+        ok, err = await self._github_put(repo, idx_path, idx_md, token, branch)
+        if not ok:
+            return False, err or "GitHub 提交失败"
+        logger.info("BlogWriter: 已补建笔记本索引 %s", idx_path)
+        return True, ""
 
     # ---------- 会话创建（账单/日程/提醒） ----------
 
@@ -1627,6 +1651,12 @@ class BlogWriter(Star):
                     now,
                 )
                 note_dir = clean_filename_part(session.meta.get("note_dir") or "日常随笔", fallback="日常随笔")
+                # 新笔记本先补 _index.json（博客书架/归档靠它识别，缺了文件夹不可见）
+                index_created = False
+                ok_idx, err_idx = await self._ensure_notebook_index(note_dir, repo, branch, token)
+                if not ok_idx and err_idx:
+                    return event.plain_result("新笔记本 _index.json 创建失败：{}，已中止发布（避免出现不可见笔记）。".format(err_idx))
+                index_created = ok_idx
                 path = "src/content/life/notebooks/{}/{}.md".format(note_dir, note_filename(now))
                 link = "/life/notebooks/{}/{}".format(note_dir, note_filename(now))
             elif session.kind == "friend":
@@ -1911,8 +1941,11 @@ class BlogWriter(Star):
                 logger.warning("BlogWriter: 调度提醒异常: %s", e)
 
         self._sessions.pop(user_id, None)
+        created_hint = "\n🎉 已新建笔记本「{}」（含 _index.json）".format(
+            clean_filename_part(session.meta.get("note_dir") or "日常随笔", fallback="日常随笔")
+        ) if session.kind == "note" and index_created else ""
         return event.plain_result(
-            "发布成功 ✅\n\n文件：{}\n博客：https://blog.tsh520.cn{}".format(final_path, link)
+            "发布成功 ✅\n\n文件：{}\n博客：https://blog.tsh520.cn{}{}".format(final_path, link, created_hint)
         )
 
     # ---------- 图片/视频 ----------
