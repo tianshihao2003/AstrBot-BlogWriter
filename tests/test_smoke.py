@@ -1395,14 +1395,47 @@ class TestWizardFlow(unittest.TestCase):
         self.assertTrue(any("已确认" in r for r in replies))
         self.assertFalse(any("请选择" in r for r in replies))
 
-    def test_bill_wizard_repay_skip_account(self):
-        # 还款且账户已识别（花呗）→ 选 4 直接确认，不再追问账户
+    def test_bill_wizard_repay_requires_fund(self):
+        # 还款且账户已识别（花呗）→ 选 4 后不再直接确认，而是追问资金来源
         asyncio.get_event_loop().run_until_complete(self._send("/账单 花呗还款200"))
         replies = asyncio.get_event_loop().run_until_complete(self._send("4"))
-        self.assertTrue(any("已确认" in r for r in replies))
+        self.assertTrue(any("用哪个账户的钱还" in r for r in replies))
         sess = self.plugin._sessions.get("u1")
         self.assertEqual(sess.meta.get("account"), "花呗")
         self.assertEqual(sess.meta.get("amount"), -200)
+        # 选择资金来源 → 还债确认两笔提示
+        replies = asyncio.get_event_loop().run_until_complete(self._send("1"))
+        self.assertTrue(any("还债已确认" in r for r in replies))
+        self.assertTrue(sess.meta.get("repay_split"))
+        self.assertEqual(sess.meta.get("_repay_fund_account"), "微信")
+        self.assertEqual(sess.meta.get("_repay_liability_account"), "花呗")
+
+    def test_bill_repay_publish_splits_two(self):
+        # 还债提交：用微信还花呗200 → 提交两笔（支出 -200 还款 + 负债 -200）
+        asyncio.get_event_loop().run_until_complete(self._send("/账单 花呗还款200"))
+        asyncio.get_event_loop().run_until_complete(self._send("4"))
+        asyncio.get_event_loop().run_until_complete(self._send("1"))
+        replies = asyncio.get_event_loop().run_until_complete(self._send("/发布"))
+        self.assertTrue(any("还债发布成功" in r for r in replies))
+        self.assertEqual(len(self.plugin.committed), 2)
+        expense_md = next(md for p, md in self.plugin.committed if "花呗还款" in p)
+        liability_md = next(md for p, md in self.plugin.committed if "花呗还款花呗还款" in p or ("amount: -200" in md and "category" in md and len(self.plugin.committed) == 2))
+        # 更可靠：按 type 区分
+        expense_found = None
+        liability_found = None
+        for _p, md in self.plugin.committed:
+            if 'type: "liability"' in md and "花呗" in md:
+                liability_found = md
+            elif 'type: "expense"' in md:
+                expense_found = md
+        self.assertIsNotNone(expense_found)
+        self.assertIsNotNone(liability_found)
+        self.assertIn("amount: -200", expense_found)
+        self.assertIn('category: "还款"', expense_found)
+        self.assertIn('account: "微信"', expense_found)
+        self.assertIn("amount: -200", liability_found)
+        self.assertIn('category: "负债"', liability_found)
+        self.assertIn('account: "花呗"', liability_found)
 
     def test_bill_empty_session_then_text_enters_wizard(self):
         # /账单 空会话 → 补发内容 → 也应进入类型确认向导（与带参路径统一）

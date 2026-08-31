@@ -566,10 +566,19 @@ class BlogWriter(Star):
         )
 
     def _bill_next_step(self, sess: Session) -> Optional[str]:
-        """类型确认后下一步：只问缺失字段，全齐返回 None（可直接发布）。"""
+        """类型确认后下一步：只问缺失字段，全齐返回 None（可直接发布）。
+
+        还债（负数 liability + 还款分类）的缺失判断以资金来源为基准，
+        数字选“负债-还款”后由 _handle_wizard 显式进入 bill_pick_repay_fund，
+        此处不处理，避免跳过追问。
+        """
         t = sess.meta.get("type")
+        if t == "liability" and sess.meta.get("repay_split"):
+            if not sess.meta.get("_repay_fund_account"):
+                return "bill_pick_repay_fund"
+            return None
         if t == "liability":
-            # 负债分类锁定，只看账户
+            # 普通负债：分类锁定，只看账户
             if str(sess.meta.get("account") or "其他") == "其他":
                 return "bill_pick_account"
             return None
@@ -592,13 +601,33 @@ class BlogWriter(Star):
                 format_choices("用的哪个信用账户？", BILL_WIZARD_LIABILITY_ACCOUNTS, with_skip_cancel=False)
                 + "\n也可直接回复账户名（如：花呗）"
             )
+        if step == "bill_pick_repay_fund":
+            return (
+                format_choices(
+                    "用哪个账户的钱还？（资金从哪里扣）",
+                    BILL_ACCOUNTS,
+                    with_skip_cancel=False,
+                )
+                + "\n也可直接回复账户名（如：微信）"
+            )
         return (
             format_choices("请选择账户：", self._bill_accounts_all(), with_skip_cancel=False)
             + "\n也可直接回复账户名"
         )
 
     def _bill_confirm_text(self, sess: Session) -> str:
-        """发布前确认摘要；信用购显示拆两笔说明。"""
+        """发布前确认摘要；信用购/还款拆两笔时显示拆法。"""
+        if sess.meta.get("repay_split"):
+            amt = abs(sess.meta.get("amount", 0))
+            la = sess.meta.get("account") or sess.meta.get("_repay_liability_account") or "花呗"
+            fund = sess.meta.get("_repay_fund_account") or "微信"
+            return (
+                "还债已确认，/发布 将一次写入 2 笔：\n"
+                "① 支出：{} -{}（分类还款，账户{}）\n"
+                "② 负债：{} -{}（分类负债，账户{}）\n"
+                "发 /发布 提交。".format(
+                    sess.meta.get("title"), amt, fund, la, amt, la)
+            )
         base = "账单已确认：{} 金额{}，分类{}，账户{}。发 /发布 提交。".format(
             sess.meta.get("title"), sess.meta.get("amount"),
             sess.meta.get("category"), sess.meta.get("account"))
@@ -1754,6 +1783,44 @@ class BlogWriter(Star):
             elif session.kind == "bill":
                 if not session.meta or session.meta.get("amount") is None:
                     return event.plain_result("账单信息不完整，请先发送账单内容（如：今天午餐微信花了32）。")
+                if session.meta.get("repay_split"):
+                    # 还债：一键拆两笔 —— 支出(还款) + 负债减少
+                    fund = str(session.meta.get("_repay_fund_account") or "微信")
+                    la = str(session.meta.get("account") or session.meta.get("_repay_liability_account") or "花呗")
+                    title = str(session.meta.get("title") or "账单").strip() or "还款"
+                    amt = abs(session.meta.get("amount", 0))
+                    expense_item = {
+                        "title": title,
+                        "amount": -amt,
+                        "type": "expense",
+                        "category": "还款",
+                        "account": fund,
+                        "date": session.meta.get("date"),
+                        "description": str(session.meta.get("description") or title),
+                    }
+                    liability_item = {
+                        "title": "{}还款".format(la),
+                        "amount": -amt,
+                        "type": "liability",
+                        "category": "负债",
+                        "account": la,
+                        "date": session.meta.get("date"),
+                        "description": "还款：{}（{} 垫付）".format(str(session.meta.get("description") or title), fund),
+                    }
+                    ok1, p1, err1 = await self._commit_md(
+                        "src/content/bills/{}-{}.md".format(now.strftime("%Y-%m-%d"), clean_filename_part(title)),
+                        build_bill_md(expense_item, now), now)
+                    ok2, p2, err2 = await self._commit_md(
+                        "src/content/bills/{}-{}.md".format(now.strftime("%Y-%m-%d"), clean_filename_part(f"{title}{la}还款")),
+                        build_bill_md(liability_item, now), now)
+                    self._sessions.pop(user_id, None)
+                    if not ok1 or not ok2:
+                        detail = "；".join(x for x, ok in ((err1, ok1), (err2, ok2)) if not ok)
+                        return event.plain_result("还债发布失败：{}（支出{}、负债{}），请检查后重试或手动补录。".format(
+                            detail, "成功" if ok1 else "失败", "成功" if ok2 else "失败"))
+                    return event.plain_result(
+                        "还债发布成功 ✅ 共 2 笔：\n① 支出：{} -{}（账户{} 分类还款）\n② 负债：{} -{}（减少负债）\n文件：{}\n{}".format(
+                            title, amt, fund, la, amt, p1, p2))
                 if session.meta.get("credit_split"):
                     # 信用购：一键拆两笔 —— 支出（消费）+ 负债（信用账户新增欠款）
                     credit_acct = str(session.meta.get("account") or "花呗")
@@ -2621,13 +2688,31 @@ class BlogWriter(Star):
                 elif picked == "income":
                     sess.meta["type"] = "income"
                     sess.meta["amount"] = abs(sess.meta.get("amount", 0))
-                elif picked in ("liability_borrow", "liability_repay"):
+                elif picked == "liability_borrow":
+                    sess.meta["type"] = "liability"
+                    sess.meta["amount"] = abs(sess.meta.get("amount", 0))
+                    sess.meta["category"] = "负债"
+                elif picked == "liability_repay":
+                    # 还债固定拆两笔：支出(还款) + 负债(-)
+                    # 先记负债账户（当前 account），追问资金来源账户
                     sess.meta["type"] = "liability"
                     sess.meta["category"] = "负债"
-                    if picked == "liability_repay":
-                        sess.meta["amount"] = -abs(sess.meta.get("amount", 0))
-                    else:
-                        sess.meta["amount"] = abs(sess.meta.get("amount", 0))
+                    sess.meta["amount"] = -abs(sess.meta.get("amount", 0))
+                    # 把当前负债账户暂存到 meta.repay_liability_account，资金来源问完后两者都清楚
+                    la = str(sess.meta.get("account") or "其他")
+                    if la in BILL_ACCOUNTS and la not in BILL_WIZARD_LIABILITY_ACCOUNTS:
+                        la = "其他"
+                    sess.meta["_repay_liability_account"] = la
+                    sess.wizard = {"step": "bill_pick_repay_fund"}
+                    sess.touch()
+                    return event.plain_result(
+                        format_choices(
+                            "用哪个账户的钱还？（资金从哪里扣）",
+                            BILL_ACCOUNTS,
+                            with_skip_cancel=False,
+                        )
+                        + "\n也可直接回复账户名（如：微信）"
+                    )
                 # 后续步骤：已识别的字段直接跳过，只问缺失的
                 nxt = self._bill_next_step(sess)
                 if nxt is None:
@@ -2699,6 +2784,7 @@ class BlogWriter(Star):
             return event.plain_result(self._bill_confirm_text(sess))
 
         if step == "bill_pick_repay_account":
+            # 保留：旧的“还债账户”步骤（现由 bill_pick_repay_fund 替代，遗留兼容）
             choice = parse_choice(text, len(BILL_WIZARD_LIABILITY_ACCOUNTS))
             if choice is not None:
                 sess.meta["account"] = BILL_WIZARD_LIABILITY_ACCOUNTS[choice - 1]
@@ -2706,6 +2792,33 @@ class BlogWriter(Star):
                 sess.meta["account"] = text.strip()
             else:
                 return event.plain_result("请选择还款账户：\n" + format_choices("还款到哪个账户？", BILL_WIZARD_LIABILITY_ACCOUNTS, with_skip_cancel=False))
+            sess.wizard = None
+            sess.touch()
+            return event.plain_result(self._bill_confirm_text(sess))
+
+        if step == "bill_pick_repay_fund":
+            # 还债：追问资金来源账户，完成后标记 repay_split
+            choice = parse_choice(text, len(BILL_ACCOUNTS))
+            if choice is not None:
+                fund = BILL_ACCOUNTS[choice - 1]
+            elif text and 1 <= len(text.strip()) <= 10:
+                fund = text.strip()
+            else:
+                return event.plain_result(
+                    "请回复数字选择用哪个账户付钱，或直接发账户名：\n"
+                    + format_choices(
+                        "用哪个账户的钱还？（资金从哪里扣）",
+                        BILL_ACCOUNTS,
+                        with_skip_cancel=False,
+                    )
+                )
+            la = str(sess.meta.get("_repay_liability_account") or sess.meta.get("account") or "花呗")
+            if la not in BILL_WIZARD_LIABILITY_ACCOUNTS:
+                if la in BILL_ACCOUNTS and la not in BILL_WIZARD_LIABILITY_ACCOUNTS:
+                    la = "花呗" if la == "其他" else la
+            sess.meta["account"] = la  # 负债账户
+            sess.meta["_repay_fund_account"] = fund  # 资金来源
+            sess.meta["repay_split"] = True
             sess.wizard = None
             sess.touch()
             return event.plain_result(self._bill_confirm_text(sess))
