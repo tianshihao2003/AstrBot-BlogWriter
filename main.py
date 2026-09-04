@@ -1075,24 +1075,25 @@ class BlogWriter(Star):
                 user_id, cmd, session is not None, (event.message_str or "")[:60],
             )
 
-            # 与博客无关的消息（非命令、无进行中会话）一律放行，绝不回复
-            if cmd not in COMMANDS and not session:
-                # 例外：无会话时收到图片/视频 → 提示，避免媒体被静默丢弃
-                if self._extract_images(event, allow_video=True):
-                    logger.info("BlogWriter: 用户 %s 无会话时发送媒体，已提示", user_id)
-                    yield event.plain_result(
-                        "当前没有进行中的会话，图片/视频未接收。请先发 /动态、/笔记、/足迹、/相册 等命令。"
-                    )
-                    return
-                return
-
-            # 非白名单用户：静默忽略，不回复（避免抢占其他插件/AI 的消息处理）
+            # 非白名单用户：静默忽略，不回复（避免在群聊中抢占其他插件/AI 的消息处理，
+            # 也防止非白名单用户触发「无会话媒体提示」）
             if not self._allowed(user_id):
                 logger.info(
                     "BlogWriter: 用户 %s（id=%s）无权限，已忽略。如需使用，请将 ID 加入 allow_users 配置。",
                     event.get_sender_name() or "?",
                     user_id,
                 )
+                return
+
+            # 与博客无关的消息（非命令、无进行中会话）一律放行，绝不回复
+            if cmd not in COMMANDS and not session:
+                # 例外：白名单用户无会话时收到图片/视频 → 提示，避免媒体被静默丢弃
+                if self._extract_images(event, allow_video=True):
+                    logger.info("BlogWriter: 用户 %s 无会话时发送媒体，已提示", user_id)
+                    yield event.plain_result(
+                        "当前没有进行中的会话，图片/视频未接收。请先发 /动态、/笔记、/足迹、/相册 等命令。"
+                    )
+                    return
                 return
 
             if not self._cfg("github_token"):

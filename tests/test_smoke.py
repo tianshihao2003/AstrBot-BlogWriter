@@ -546,6 +546,51 @@ class TestFlow(unittest.TestCase):
         replies = asyncio.get_event_loop().run_until_complete(run())
         self.assertEqual(len(replies), 0)
 
+    def test_permission_denied_image_no_hint(self):
+        """回归（2026-09-04 群聊回人 bug）：非白名单用户无会话发图片，
+        绝不回复「无会话媒体提示」（白名单检查必须前置）。"""
+        from astrbot.api.message_components import Image
+        from pathlib import Path
+
+        tmp = Path(os.environ.get("TEMP", ".")) / "blogwriter_hacker.png"
+        tmp.write_bytes(b"fake")
+        try:
+            ev = types.SimpleNamespace(
+                message_str="",
+                get_sender_id=lambda: "hacker",
+                get_sender_name=lambda: "黑客",
+                get_messages=lambda: [Image(file=str(tmp))],
+                plain_result=lambda t: types.SimpleNamespace(text=t),
+                message_obj=types.SimpleNamespace(raw_message={}),
+            )
+
+            async def run():
+                out = []
+                async for r in self.plugin.on_message(ev):
+                    out.append(r)
+                return out
+
+            replies = asyncio.get_event_loop().run_until_complete(run())
+            self.assertEqual(len(replies), 0)
+        finally:
+            tmp.unlink(missing_ok=True)
+
+    def test_whitelisted_image_without_session_hint(self):
+        """白名单用户无会话发图片才提示（媒体不被静默丢弃）。"""
+        from astrbot.api.message_components import Image
+        from pathlib import Path
+
+        tmp = Path(os.environ.get("TEMP", ".")) / "blogwriter_owner.png"
+        tmp.write_bytes(b"fake")
+        try:
+            replies = asyncio.get_event_loop().run_until_complete(
+                self._send("", messages=[Image(file=str(tmp))])
+            )
+            self.assertEqual(len(replies), 1)
+            self.assertIn("没有进行中的会话", replies[0])
+        finally:
+            tmp.unlink(missing_ok=True)
+
     def test_unrelated_message_passthrough(self):
         """普通聊天消息（非命令、无会话）一律放行：白名单用户也不回复。"""
         replies = asyncio.get_event_loop().run_until_complete(self._send("今天天气不错"))
