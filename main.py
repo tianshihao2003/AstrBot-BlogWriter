@@ -590,7 +590,11 @@ class BlogWriter(Star):
 
     def _bill_step_prompt(self, step: str) -> str:
         if step == "bill_pick_category":
-            return format_choices("请选择分类：", BILL_CATEGORIES, with_skip_cancel=False)
+            return format_choices(
+                "请选择分类（回数字选常用分类，或直接发自定义分类名）：",
+                BILL_CATEGORIES,
+                with_skip_cancel=False,
+            )
         return (
             format_choices("请选择账户：", self._bill_accounts_all(), with_skip_cancel=False)
             + "\n也可直接回复账户名"
@@ -1231,11 +1235,7 @@ class BlogWriter(Star):
                                 return
                             if m_cat:
                                 cat = m_cat.group(1)
-                                if cat not in BILL_CATEGORIES:
-                                    yield event.plain_result(
-                                        "分类「{}」不在白名单，可选：{}。".format(cat, "、".join(BILL_CATEGORIES))
-                                    )
-                                    return
+                                # 自定义分类：白名单外直接接受（1-10 字已在正则限制）
                                 session.meta["category"] = cat
                                 session.touch()
                                 yield event.plain_result(
@@ -2514,8 +2514,7 @@ class BlogWriter(Star):
             m_acc_early = re.match(r"^(?:账户|账号|account)\s*[:：]?\s*(\S{1,10})\s*$", text)
             if m_cat_early:
                 cat = m_cat_early.group(1)
-                if cat not in BILL_CATEGORIES:
-                    return event.plain_result("分类「{}」不在白名单，可选：{}。".format(cat, "、".join(BILL_CATEGORIES)))
+                # 自定义分类：白名单外直接接受（1-10 字已在正则限制）
                 sess.meta["category"] = cat
                 sess.touch()
                 return event.plain_result("已修改分类：{}。当前账单：{} 金额{}，分类{}，账户{}。发 /发布 提交。".format(
@@ -2573,10 +2572,14 @@ class BlogWriter(Star):
             choice = parse_choice(text, len(BILL_CATEGORIES))
             if choice is not None:
                 sess.meta["category"] = BILL_CATEGORIES[choice - 1]
-            elif text and text.strip() in BILL_CATEGORIES:
+            elif text and 1 <= len(text.strip()) <= 10:
+                # 白名单外直接接受为自定义分类（如「水产」「鱼」）
                 sess.meta["category"] = text.strip()
             else:
-                return event.plain_result("请回复数字选择分类：\n" + format_choices("请选择分类：", BILL_CATEGORIES, with_skip_cancel=False))
+                return event.plain_result(
+                    "请回复数字选常用分类，或直接发自定义分类名（1-10 字）：\n"
+                    + format_choices("请选择分类：", BILL_CATEGORIES, with_skip_cancel=False)
+                )
             nxt = self._bill_next_step(sess)
             if nxt is None:
                 sess.wizard = None

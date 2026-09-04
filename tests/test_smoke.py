@@ -881,9 +881,10 @@ class TestBillSchedule(unittest.TestCase):
         replies = asyncio.get_event_loop().run_until_complete(self._send("账户: 现金"))
         self.assertTrue(any("已修改账户" in r for r in replies))
         self.assertEqual(sess.meta.get("account"), "现金")
-        # 白名单外分类拒绝
-        replies = asyncio.get_event_loop().run_until_complete(self._send("分类: 不存在的分类"))
-        self.assertTrue(any("白名单" in r for r in replies))
+        # 白名单外分类直接接受为自定义分类
+        replies = asyncio.get_event_loop().run_until_complete(self._send("分类: 水产"))
+        self.assertTrue(any("已修改分类" in r for r in replies))
+        self.assertEqual(sess.meta.get("category"), "水产")
 
     def test_remind_command(self):
         replies = asyncio.get_event_loop().run_until_complete(self._send("/提醒"))

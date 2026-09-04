@@ -613,6 +613,57 @@ class TestBillSchedule(unittest.TestCase):
         self.assertEqual(data["type"], "expense")
         self.assertEqual(data["amount"], -30)
 
+    def test_parse_bill_time_expressions(self):
+        # 时间表达提取 → time 字段 HH:mm；标题不混入时间词
+        cases = {
+            "晚上8点吃了火锅60": "20:00",
+            "下午3点半打车12": "15:30",
+            "12点30分午饭20": "12:30",
+            "14:30 奶茶18": "14:30",
+            "早上6点买了包子5": "06:00",
+        }
+        for text, expect in cases.items():
+            data, err = parse_bill(text)
+            self.assertEqual(err, "", text)
+            self.assertEqual(data["time"], expect, text)
+        # 无时间词 → 回退当前时刻（HH:mm 格式）
+        data, _ = parse_bill("午餐30")
+        self.assertRegex(data["time"], r"^\d{2}:\d{2}$")
+        # 标题剥离时间词
+        hotpot, _ = parse_bill("晚上8点吃了火锅60")
+        self.assertNotIn("8点", hotpot["title"])
+
+    def test_build_bill_md_includes_time(self):
+        # build_bill_md 输出 time 字段（HH:mm 带引号），旧数据缺 time 时回退 now
+        from blog_writer_core import build_bill_md
+        md = build_bill_md(
+            {
+                "title": "买鱼",
+                "amount": -22,
+                "type": "expense",
+                "category": "水产",
+                "account": "微信",
+                "date": datetime(2026, 9, 5),
+                "time": "09:05",
+                "description": "买鱼",
+            },
+            now=datetime(2026, 9, 5, 10, 0),
+        )
+        self.assertIn('time: "09:05"', md)
+        # time 缺失/非法 → 回退 now 的 HH:mm
+        md2 = build_bill_md(
+            {
+                "title": "买鱼",
+                "amount": -22,
+                "type": "expense",
+                "category": "水产",
+                "account": "微信",
+                "date": datetime(2026, 9, 5),
+            },
+            now=datetime(2026, 9, 5, 10, 0),
+        )
+        self.assertIn('time: "10:00"', md2)
+
     def test_parse_bill_category_prefix(self):
         # 首词分类前缀：关键词没命中的冷门消费（如理发）可显式指定分类
         data, _ = parse_bill("食品酒水 买了箱牛奶45")

@@ -1074,6 +1074,42 @@ def _parse_bill_date(text: str, now: datetime) -> datetime:
     return base
 
 
+# 时间表达：14:30 / 14：30 / 下午3点 / 3点半 / 12点30分 / 9点
+_BILL_TIME_RE = re.compile(
+    r"(凌晨|早上|上午|中午|午后|下午|傍晚|晚上|夜里)?\s*(\d{1,2})[点时](?:\s*(\d{1,2})\s*分?|\s*(半))?"
+    r"|\s*(\d{1,2})\s*[:：]\s*(\d{2})\s*(?:分)?"
+)
+
+
+def _parse_bill_time(text: str, now: datetime):
+    """从文本提取时刻，返回 'HH:mm'；识别不到返回 None（调用方回退当前时刻）"""
+    m = _BILL_TIME_RE.search(text or "")
+    if not m:
+        return None
+    try:
+        if m.group(5) is not None:
+            # 冒号形态 14:30
+            hour, minute = int(m.group(5)), int(m.group(6))
+        else:
+            hour = int(m.group(2))
+            if m.group(4) == "半":
+                minute = 30
+            elif m.group(3) is not None:
+                minute = int(m.group(3))
+            else:
+                minute = 0
+            tag = m.group(1) or ""
+            if hour < 12 and tag in ("午后", "下午", "傍晚", "晚上", "夜里"):
+                hour += 12
+            elif hour == 12 and tag in ("凌晨", "早上", "上午"):
+                hour = 0
+    except ValueError:
+        return None
+    if not (0 <= hour <= 23 and 0 <= minute <= 59):
+        return None
+    return "{:02d}:{:02d}".format(hour, minute)
+
+
 def _detect_bill_category(text: str) -> str:
     # 优先精确命中分类名本身
     for cat in BILL_CATEGORIES:
@@ -1239,11 +1275,15 @@ def parse_bill(text: str, now=None) -> Tuple[Optional[Dict], str]:
         category = _detect_bill_category(raw)
     account = _detect_bill_account(raw)
     date_val = _parse_bill_date(raw, now)
+    # 时刻：显式时间词（下午3点/12点30/14:30）优先，否则记录当前时刻
+    time_val = _parse_bill_time(raw, now) or now.strftime("%H:%M")
 
     # 标题/描述提取：去除已知片段后剩余文本
     cleaned = raw
     # 去除日期词
     cleaned = re.sub(r"(今天|明天|昨天|后天|\d{4}-\d{2}-\d{2}|\d{1,2}月\d{1,2}日)", "", cleaned)
+    # 去除时间词（与 _BILL_TIME_RE 同口径，避免「12点」等混入标题）
+    cleaned = _BILL_TIME_RE.sub(" ", cleaned)
     # 去除账户
     for acc in BILL_ACCOUNTS:
         cleaned = cleaned.replace(acc, "")
@@ -1285,6 +1325,7 @@ def parse_bill(text: str, now=None) -> Tuple[Optional[Dict], str]:
         "category": category,
         "account": account,
         "date": date_val,
+        "time": time_val,
         "description": description,
     }
     return data, ""
@@ -1750,6 +1791,10 @@ def build_bill_md(data: Dict, now=None) -> str:
         date_str = date_val.strftime("%Y-%m-%d")
     else:
         date_str = str(date_val).strip() or now.strftime("%Y-%m-%d")
+    # 时刻（HH:mm）：无则回退当前时刻，保证博客今日流水可展示
+    time_val = str(data.get("time") or "").strip()
+    if not re.match(r"^\d{2}:\d{2}$", time_val):
+        time_val = now.strftime("%H:%M")
     description = str(data.get("description") or title).strip()
     tags = data.get("tags")
     if tags is None:
@@ -1764,6 +1809,7 @@ def build_bill_md(data: Dict, now=None) -> str:
         "category": category,
         "account": account,
         "date": date_str,
+        "time": time_val,
         "description": description,
         "tags": list(tags),
     }
