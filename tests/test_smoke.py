@@ -591,6 +591,73 @@ class TestFlow(unittest.TestCase):
         finally:
             tmp.unlink(missing_ok=True)
 
+    def test_command_stops_event(self):
+        """官方规范：命令被插件完整消费后必须 stop_event，阻断 LLM 阶段重复回复。"""
+        stops = []
+        ev = types.SimpleNamespace(
+            message_str="/动态 测试",
+            get_sender_id=lambda: "u1",
+            get_sender_name=lambda: "用户",
+            get_messages=lambda: [],
+            plain_result=lambda t: types.SimpleNamespace(text=t),
+            stop_event=lambda: stops.append(1),
+        )
+
+        async def run():
+            out = []
+            async for r in self.plugin.on_message(ev):
+                out.append(r)
+            return out
+
+        replies = asyncio.get_event_loop().run_until_complete(run())
+        self.assertEqual(len(replies), 1)
+        self.assertEqual(len(stops), 1)
+
+    def test_unrelated_message_no_stop(self):
+        """无关消息放行时不阻断（事件继续传播给其他插件/LLM）。"""
+        stops = []
+        ev = types.SimpleNamespace(
+            message_str="今天天气不错",
+            get_sender_id=lambda: "u1",
+            get_sender_name=lambda: "用户",
+            get_messages=lambda: [],
+            plain_result=lambda t: types.SimpleNamespace(text=t),
+            stop_event=lambda: stops.append(1),
+        )
+
+        async def run():
+            out = []
+            async for r in self.plugin.on_message(ev):
+                out.append(r)
+            return out
+
+        replies = asyncio.get_event_loop().run_until_complete(run())
+        self.assertEqual(len(replies), 0)
+        self.assertEqual(len(stops), 0)
+
+    def test_reminder_file_prefers_astrbot_data_dir(self):
+        """官方规范：生产环境（AstrBot 根 data/ 存在）提醒持久化应写到
+        data/plugin_data/blog_writer/ 而非插件目录，防重装覆盖。"""
+        import tempfile
+        import shutil
+        import main as _m
+        from pathlib import Path as _P
+
+        old_cwd = os.getcwd()
+        tmp = tempfile.mkdtemp()
+        try:
+            os.chdir(tmp)
+            (_P(tmp) / "data" / "plugins").mkdir(parents=True)
+            resolved = self.plugin._resolve_reminder_file()
+            self.assertIn("data/plugin_data/blog_writer/schedules_reminder.json", str(resolved).replace("\\", "/"))
+            # 本地开发/测试环境（无 AstrBot data 结构）回退插件目录
+            os.chdir(old_cwd)
+            resolved2 = self.plugin._resolve_reminder_file()
+            self.assertEqual(resolved2, _m.REMINDER_FILE)
+        finally:
+            os.chdir(old_cwd)
+            shutil.rmtree(tmp, ignore_errors=True)
+
     def test_unrelated_message_passthrough(self):
         """普通聊天消息（非命令、无会话）一律放行：白名单用户也不回复。"""
         replies = asyncio.get_event_loop().run_until_complete(self._send("今天天气不错"))

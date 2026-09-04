@@ -69,7 +69,6 @@ try:
         BILL_CATEGORIES,
         COMMANDS,
         SCHEDULE_PRIORITIES,
-        SESSION_TIMEOUT,
         build_album_md,
         build_amap_url,
         build_bangumi_md,
@@ -119,7 +118,6 @@ try:
         site_host,
         tmdb_poster_url,
         upload_base_host,
-        upload_url_with_return_format,
         validate_friend_data,
         with_suffix,
         Session,
@@ -136,7 +134,6 @@ except ImportError:  # 兼容非包形式加载
         BILL_CATEGORIES,
         COMMANDS,
         SCHEDULE_PRIORITIES,
-        SESSION_TIMEOUT,
         build_album_md,
         build_amap_url,
         build_bangumi_md,
@@ -186,7 +183,6 @@ except ImportError:  # 兼容非包形式加载
         site_host,
         tmdb_poster_url,
         upload_base_host,
-        upload_url_with_return_format,
         validate_friend_data,
         with_suffix,
         Session,
@@ -220,7 +216,7 @@ class BlogWriter(Star):
         self._lock = asyncio.Lock()
         self._client = None
         self._reminders: List[Tuple[str, str, datetime]] = []
-        self._reminder_file = Path(__file__).parent / "data" / "schedules_reminder.json"
+        self._reminder_file = self._resolve_reminder_file()
         self._loop = None
         try:
             self._loop = asyncio.get_running_loop()
@@ -239,28 +235,47 @@ class BlogWriter(Star):
                     self._scheduler = BackgroundScheduler()
                 self._scheduler.start()
                 self._restore_reminders()
-                logger.info("BlogWriter: APScheduler 提醒调度器已启动")
+                logger.info("BlogWriter: APScheduler 提醒调度器已启动（持久化：%s）", self._reminder_file)
             except Exception as e:
                 logger.warning("BlogWriter: APScheduler 启动失败: %s", e)
                 self._scheduler = None
         else:
             logger.warning("BlogWriter: 未安装 apscheduler，提醒功能将仅内存生效（重启丢失）")
 
-    def _load_reminders(self) -> List[Dict]:
+    def _resolve_reminder_file(self) -> Path:
+        """提醒持久化路径。官方规范（docs.astrbot.app/dev/star）：持久化数据应存
+        AstrBot 根 data/ 目录，而非插件自身目录——否则重装/更新插件 zip 时被覆盖。
+        识别 AstrBot 根：cwd 下存在 data/plugins 或 data/config；识别不到（本地开发/
+        测试）回退插件目录旧行为。"""
         try:
-            # 优先用模块级 REMINDER_FILE（便于测试时 mock），兼容实例级
-            rf = globals().get("REMINDER_FILE", getattr(self, "_reminder_file", REMINDER_FILE))
-            if rf.exists():
-                return json.loads(rf.read_text(encoding="utf-8"))
+            cwd = Path(os.getcwd())
+            if (cwd / "data" / "plugins").is_dir() or (cwd / "data" / "config").is_dir():
+                return cwd / "data" / "plugin_data" / "blog_writer" / "schedules_reminder.json"
         except Exception as e:
-            logger.warning("BlogWriter: 读取提醒文件失败: %s", e)
+            logger.warning("BlogWriter: 解析提醒持久化路径失败，回退插件目录: %s", e)
+        return REMINDER_FILE
+
+    def _load_reminders(self) -> List[Dict]:
+        # 测试通过替换模块级 REMINDER_FILE 隔离路径时优先之；否则先读新路径，
+        # 再读插件目录旧路径（老用户迁移兼容，不丢历史提醒）
+        rf = globals().get("REMINDER_FILE", REMINDER_FILE)
+        if rf != REMINDER_FILE:
+            paths = [rf]
+        else:
+            paths = [self._reminder_file, REMINDER_FILE]
+        for p in paths:
+            try:
+                if p.exists():
+                    return json.loads(p.read_text(encoding="utf-8"))
+            except Exception as e:
+                logger.warning("BlogWriter: 读取提醒文件失败: %s (%s)", e, p)
         return []
 
     def _save_reminders(self, data: List[Dict]) -> None:
         try:
-            rf = globals().get("REMINDER_FILE", getattr(self, "_reminder_file", REMINDER_FILE))
-            rf.parent.mkdir(parents=True, exist_ok=True)
-            rf.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+            p = self._reminder_file
+            p.parent.mkdir(parents=True, exist_ok=True)
+            p.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
         except Exception as e:
             logger.warning("BlogWriter: 保存提醒文件失败: %s", e)
 
@@ -1090,11 +1105,21 @@ class BlogWriter(Star):
                 # 例外：白名单用户无会话时收到图片/视频 → 提示，避免媒体被静默丢弃
                 if self._extract_images(event, allow_video=True):
                     logger.info("BlogWriter: 用户 %s 无会话时发送媒体，已提示", user_id)
+                    # 本条消息已被插件完整消费，阻断传播（否则 LLM 阶段还会再收到）
+                    _stop = getattr(event, "stop_event", None)
+                    if callable(_stop):
+                        _stop()
                     yield event.plain_result(
                         "当前没有进行中的会话，图片/视频未接收。请先发 /动态、/笔记、/足迹、/相册 等命令。"
                     )
                     return
                 return
+
+            # 命令或已有会话的消息由本插件完整消费：按官方规范 stop_event 阻断传播，
+            # 否则 yield 结果后事件仍会进入 LLM 阶段（/ 前缀或 @ 唤醒时 LLM 会再答一次）
+            _stop = getattr(event, "stop_event", None)
+            if callable(_stop):
+                _stop()
 
             if not self._cfg("github_token"):
                 yield event.plain_result("插件未配置 GitHub Token，请在插件设置中填写后再使用。")
@@ -2880,3 +2905,10 @@ class BlogWriter(Star):
         if self._client is not None:
             await self._client.aclose()
             self._client = None
+        # 官方规范：卸载/停用插件时必须清理后台线程，否则重载后调度器残留可能双发提醒
+        if self._scheduler is not None:
+            try:
+                self._scheduler.shutdown(wait=False)
+            except Exception as e:
+                logger.warning("BlogWriter: 关闭提醒调度器失败: %s", e)
+            self._scheduler = None
