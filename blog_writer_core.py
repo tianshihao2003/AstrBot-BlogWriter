@@ -917,7 +917,8 @@ MEDIA_WIZARD_CATEGORIES = [
     ("纪录片", "documentary"),
     ("游戏", "game"),
 ]
-BILL_WIZARD_LIABILITY_ACCOUNTS = ["花呗", "白条", "信用卡", "京东白条", "抖音月付", "微信分付"]
+# 信用账户（作为普通账户选项供向导选择；账户只是记账口径，不再关联负债类型）
+BILL_WIZARD_CREDIT_ACCOUNTS = ["花呗", "白条", "信用卡", "京东白条", "抖音月付", "微信分付"]
 
 
 def is_wizard_cancel(text: str) -> bool:
@@ -1024,20 +1025,19 @@ _BILL_CATEGORY_KEYWORDS: Dict[str, List[str]] = {
 # 账单类型关键词
 _BILL_EXPENSE_KEYWORDS = ["花了", "支出", "花费", "付款", "消费", "支付", "扣款", "买"]
 _BILL_INCOME_KEYWORDS = ["工资", "收入", "到账", "收款", "入账", "奖金", "发工资"]
-# 负债关键词（对齐博客 bill-adapter：liability 正数=借入新增，负数=还款减少）
-_BILL_LIABILITY_BORROW_KEYWORDS = ["借款", "欠款", "欠了", "负债", "花呗", "白条"]
-_BILL_LIABILITY_REPAY_KEYWORDS = ["还款", "偿还", "还了", "已还"]
-# 账户别名（不在白名单但博客已有数据使用，如 liability 的 account: 花呗）
+# 还款本质是资金流出，记为普通支出（对齐博客去负债后的模型：type 仅 expense/income）
+_BILL_REPAY_KEYWORDS = ["还款", "偿还", "还了", "已还"]
+# 借款/欠款类（负债快照）已不再支持，命中即报错
+_BILL_BORROW_KEYWORDS = ["借款", "欠款", "欠了", "负债"]
+# 账户别名（不在白名单但博客已有数据使用，如 account: 花呗）
 _BILL_ACCOUNT_ALIASES = ["花呗", "白条", "信用卡"]
-# 显式类型前缀（/账单 支出|收入|负债 <内容>）
+# 显式类型前缀（/账单 支出|收入|还款 <内容>）
 _BILL_TYPE_PREFIX = {
     "支出": "expense",
     "消费": "expense",
     "花费": "expense",
     "收入": "income",
-    "负债": "liability",
-    "借款": "liability",
-    "还款": "liability",
+    "还款": "expense",
 }
 
 
@@ -1091,7 +1091,7 @@ def _detect_bill_account(text: str) -> str:
     for acc in BILL_ACCOUNTS:
         if acc in text:
             return acc
-    # 别名（如负债账户：花呗/白条/信用卡），对齐博客现有数据 account: 花呗
+    # 别名（信用账户：花呗/白条/信用卡），对齐博客现有数据 account: 花呗
     for alias in _BILL_ACCOUNT_ALIASES:
         if alias in text:
             return alias
@@ -1162,29 +1162,30 @@ def parse_bills_batch(text: str, now=None) -> Tuple[List[Dict], str]:
 def parse_bill(text: str, now=None) -> Tuple[Optional[Dict], str]:
     """解析账单自然语言。返回 (data, err)，err 为空表示成功。
 
-    data 包含：title, amount, type(expense/income/liability), category, account, date(datetime), description
+    data 包含：title, amount, type(expense/income), category, account, date(datetime), description
 
     类型判定（显式优先）：
-    1. 首词为类型前缀（支出/消费/花费/收入/负债/借款/还款）+ 空格 → 显式指定
+    1. 首词为类型前缀（支出/消费/花费/收入/还款）+ 空格 → 显式指定
     2. 收入关键词（工资/收入/到账…）→ income
-    3. 负债关键词（借款/欠款/负债/花呗… 或 还款/偿还…）→ liability
+    3. 还款关键词（还款/偿还/还了…）→ expense（分类固定「还款」，金额为负）
     4. 支出关键词或默认 → expense
-
-    liability 符号（对齐博客现有数据与 bill-adapter：liability += amount）：
-    还款为负（减少负债）、借入为正（新增负债），不取绝对值；category 固定「负债」。
+    5. 借款/欠款/负债 → 报错（负债类型已下线，博客账单仅支持 支出/收入）
     """
     now = now or now_shanghai()
     raw = (text or "").strip()
     if not raw:
         return None, "内容为空"
 
-    # 显式前缀（首词 + 空格）：类型前缀（支出/收入/负债…）或分类前缀（白名单分类名如「餐饮」）
+    # 显式前缀（首词 + 空格）：类型前缀（支出/收入/还款…）或分类前缀（白名单分类名如「餐饮」）
     type_hint = None
     category_hint = None
     first_token = re.split(r"\s+", raw, 1)[0]
     if re.search(r"\s", raw):
         if first_token in _BILL_TYPE_PREFIX:
             type_hint = _BILL_TYPE_PREFIX[first_token]
+            # 「还款」前缀：分类固定「还款」，避免落回「其他」
+            if first_token == "还款":
+                category_hint = "还款"
             raw = re.sub(r"^\S+\s+", "", raw, count=1).strip()
             # 类型前缀后紧跟分类前缀也支持（如「支出 餐饮 午餐30」）
             second_token = re.split(r"\s+", raw, 1)[0]
@@ -1206,26 +1207,24 @@ def parse_bill(text: str, now=None) -> Tuple[Optional[Dict], str]:
     except ValueError:
         return None, "金额解析失败"
 
-    # 类型判断（显式前缀 > 收入 > 负债 > 支出/默认）
+    # 类型判断（显式前缀 > 收入 > 还款记支出 > 支出/默认）
     has_income = any(kw in raw for kw in _BILL_INCOME_KEYWORDS)
-    has_repay = any(kw in raw for kw in _BILL_LIABILITY_REPAY_KEYWORDS)
-    has_borrow = any(kw in raw for kw in _BILL_LIABILITY_BORROW_KEYWORDS)
+    has_repay = any(kw in raw for kw in _BILL_REPAY_KEYWORDS)
+    has_borrow = any(kw in raw for kw in _BILL_BORROW_KEYWORDS)
+    if has_borrow:
+        return None, "负债类型已下线（账单仅支持 支出/收入）：借款/欠款不再支持记账，还款会自动记为支出"
     if type_hint:
         type_ = type_hint
     elif has_income:
         type_ = "income"
-    elif has_repay or has_borrow:
-        type_ = "liability"
     else:
-        # 无显式关键词时默认 expense
+        # 还款关键词与无显式关键词时均默认 expense
         type_ = "expense"
 
     if type_ == "expense":
         amount = -abs(amount_val)
-    elif type_ == "income":
+    else:
         amount = abs(amount_val)
-    else:  # liability：还款为负（减负债）、借入为正（增负债），不取绝对值
-        amount = -abs(amount_val) if has_repay else abs(amount_val)
     # 保持整数类型
     if isinstance(amount, float) and amount == int(amount):
         amount = int(amount)
@@ -1233,9 +1232,9 @@ def parse_bill(text: str, now=None) -> Tuple[Optional[Dict], str]:
     if category_hint:
         # 显式分类前缀优先于关键词检测
         category = category_hint
-    elif type_ == "liability":
-        # 对齐博客现有负债数据：category 固定「负债」（tags 由 build_bill_md 按 category 自动生成）
-        category = "负债"
+    elif has_repay and type_ == "expense":
+        # 还款统一归入「还款」分类（对齐博客现有补记数据）
+        category = "还款"
     else:
         category = _detect_bill_category(raw)
     account = _detect_bill_account(raw)
@@ -1742,7 +1741,7 @@ def build_bill_md(data: Dict, now=None) -> str:
     title = str(data.get("title") or data.get("description") or "账单").strip() or "账单"
     amount = data.get("amount", 0)
     type_ = data.get("type", "expense")
-    if type_ not in ("income", "expense", "transfer", "liability"):
+    if type_ not in ("income", "expense"):
         type_ = "expense"
     category = str(data.get("category") or "其他").strip() or "其他"
     account = str(data.get("account") or "其他").strip() or "其他"

@@ -126,7 +126,7 @@ try:
         is_wizard_cancel,
         is_wizard_skip,
         MEDIA_WIZARD_CATEGORIES,
-        BILL_WIZARD_LIABILITY_ACCOUNTS,
+        BILL_WIZARD_CREDIT_ACCOUNTS,
     )
 except ImportError:  # 兼容非包形式加载
     from blog_writer_core import (
@@ -191,7 +191,7 @@ except ImportError:  # 兼容非包形式加载
         is_wizard_cancel,
         is_wizard_skip,
         MEDIA_WIZARD_CATEGORIES,
-        BILL_WIZARD_LIABILITY_ACCOUNTS,
+        BILL_WIZARD_CREDIT_ACCOUNTS,
     )
 
 CONNECT_TIMEOUT = 15
@@ -205,7 +205,7 @@ RETRY_DELAYS = (1.0, 3.0)
 @register(
     "blog_writer",
     "tianshihao2003",
-    "通过微信/QQ对话更新博客的动态、笔记、足迹、相册、友链、账单、日程（交互式向导 + 信用购一键拆两笔 + 日程提醒）",
+    "通过微信/QQ对话更新博客的动态、笔记、足迹、相册、友链、账单、日程（交互式向导 + 日程提醒）",
     "v1.0.0",
 )
 class BlogWriter(Star):
@@ -566,42 +566,22 @@ class BlogWriter(Star):
 
     # ---------- 向导辅助 ----------
 
-    _BILL_TYPE_LABELS = {"expense": "支出", "income": "收入", "liability": "负债", "transfer": "转账"}
+    _BILL_TYPE_LABELS = {"expense": "支出", "income": "收入"}
 
     def _bill_accounts_all(self) -> List[str]:
-        """账户全量选项：基础白名单 + 信用账户别名。"""
-        return BILL_ACCOUNTS + [a for a in BILL_WIZARD_LIABILITY_ACCOUNTS if a not in BILL_ACCOUNTS]
+        """账户全量选项：基础白名单 + 信用账户别名（账户仅是记账口径）。"""
+        return BILL_ACCOUNTS + [a for a in BILL_WIZARD_CREDIT_ACCOUNTS if a not in BILL_ACCOUNTS]
 
     def _bill_type_prompt(self) -> str:
         return format_choices(
             "请确认类型：",
-            ["支出", "收入", "负债-借入", "负债-还款"],
-            extra=["直接发布", "重说", "信用购(拆支出+负债)"],
+            ["支出", "收入"],
+            extra=["直接发布", "重说"],
             with_skip_cancel=False,
         )
 
     def _bill_next_step(self, sess: Session) -> Optional[str]:
-        """类型确认后下一步：只问缺失字段，全齐返回 None（可直接发布）。
-
-        还债（负数 liability + 还款分类）的缺失判断以资金来源为基准，
-        数字选“负债-还款”后由 _handle_wizard 显式进入 bill_pick_repay_fund，
-        此处不处理，避免跳过追问。
-        """
-        t = sess.meta.get("type")
-        if t == "liability" and sess.meta.get("repay_split"):
-            if not sess.meta.get("_repay_fund_account"):
-                return "bill_pick_repay_fund"
-            return None
-        if t == "liability":
-            # 普通负债：分类锁定，只看账户
-            if str(sess.meta.get("account") or "其他") == "其他":
-                return "bill_pick_account"
-            return None
-        if sess.meta.get("credit_split"):
-            # 信用购：分类可自动，账户必须是信用账户
-            if str(sess.meta.get("account") or "") not in BILL_WIZARD_LIABILITY_ACCOUNTS:
-                return "bill_pick_credit_account"
-            return None
+        """类型确认后下一步：只问缺失字段，全齐返回 None（可直接发布）。"""
         if str(sess.meta.get("category") or "其他") == "其他":
             return "bill_pick_category"
         if str(sess.meta.get("account") or "其他") == "其他":
@@ -611,53 +591,16 @@ class BlogWriter(Star):
     def _bill_step_prompt(self, step: str) -> str:
         if step == "bill_pick_category":
             return format_choices("请选择分类：", BILL_CATEGORIES, with_skip_cancel=False)
-        if step == "bill_pick_credit_account":
-            return (
-                format_choices("用的哪个信用账户？", BILL_WIZARD_LIABILITY_ACCOUNTS, with_skip_cancel=False)
-                + "\n也可直接回复账户名（如：花呗）"
-            )
-        if step == "bill_pick_repay_fund":
-            return (
-                format_choices(
-                    "用哪个账户的钱还？（资金从哪里扣）",
-                    BILL_ACCOUNTS,
-                    with_skip_cancel=False,
-                )
-                + "\n也可直接回复账户名（如：微信）"
-            )
         return (
             format_choices("请选择账户：", self._bill_accounts_all(), with_skip_cancel=False)
             + "\n也可直接回复账户名"
         )
 
     def _bill_confirm_text(self, sess: Session) -> str:
-        """发布前确认摘要；信用购/还款拆两笔时显示拆法。"""
-        if sess.meta.get("repay_split"):
-            amt = abs(sess.meta.get("amount", 0))
-            la = sess.meta.get("account") or sess.meta.get("_repay_liability_account") or "花呗"
-            fund = sess.meta.get("_repay_fund_account") or "微信"
-            return (
-                "还债已确认，/发布 将一次写入 2 笔：\n"
-                "① 支出：{} -{}（分类还款，账户{}）\n"
-                "② 负债：{} -{}（分类负债，账户{}）\n"
-                "发 /发布 提交。".format(
-                    sess.meta.get("title"), amt, fund, la, amt, la)
-            )
-        base = "账单已确认：{} 金额{}，分类{}，账户{}。发 /发布 提交。".format(
+        """发布前确认摘要。"""
+        return "账单已确认：{} 金额{}，分类{}，账户{}。发 /发布 提交。".format(
             sess.meta.get("title"), sess.meta.get("amount"),
             sess.meta.get("category"), sess.meta.get("account"))
-        if sess.meta.get("credit_split"):
-            amt = abs(sess.meta.get("amount", 0))
-            acct = sess.meta.get("account")
-            base = (
-                "信用购已确认，/发布 将一次写入 2 笔：\n"
-                "① 支出：{} -{}（分类{}，账户{}）\n"
-                "② 负债：{}消费 +{}（分类负债，账户{}）\n"
-                "发 /发布 提交。".format(
-                    sess.meta.get("title"), amt, sess.meta.get("category"), acct,
-                    acct, amt, acct)
-            )
-        return base
 
     async def _list_notebook_names(self, repo: str, branch: str, token: str) -> Optional[List[str]]:
         """列出 src/content/life/notebooks 下的一级目录名（笔记本名）。
@@ -711,14 +654,12 @@ class BlogWriter(Star):
     # ---------- 会话创建（账单/日程/提醒） ----------
 
     def _apply_bill_defaults(self, item: Dict) -> None:
-        """正则解析出的账单项应用配置默认值（账户/分类为「其他」时替换）。
-
-        负债不套默认账户（负债常挂在花呗/白条等信用账户，默认「微信」不对）。"""
-        if item.get("account") == "其他" and item.get("type") != "liability":
+        """正则解析出的账单项应用配置默认值（账户/分类为「其他」时替换）。"""
+        if item.get("account") == "其他":
             default_acc = self._cfg("bill_default_account", "其他")
             if default_acc in BILL_ACCOUNTS:
                 item["account"] = default_acc
-        if item.get("category") == "其他" and item.get("type") != "liability":
+        if item.get("category") == "其他":
             default_cat = self._cfg("bill_default_category", "其他")
             if default_cat in BILL_CATEGORIES:
                 item["category"] = default_cat
@@ -731,19 +672,13 @@ class BlogWriter(Star):
                 "账单会话已创建，请发送账单内容，发 /发布 提交，发 /取消 放弃。\n"
                 "支出：今天午餐微信花了32（或首词「支出」显式指定）\n"
                 "收入：发工资12000 银行卡（或首词「收入」）\n"
-                "负债：花呗借款5000 / 花呗还款2000（借入为正、还款为负；或首词「负债」）\n"
-                "信用购：/账单 信用购 花呗 午餐30（一键拆成 支出+负债 两笔）\n"
+                "还款：花呗还款2000（自动记为支出，分类「还款」）\n"
                 "批量：午餐30晚餐45打车12"
             )
-        # 信用购快车道：首词「信用购/信用买」→ 一键拆 支出+负债 两笔
-        first_token = re.split(r"\s+", text, 1)[0]
-        credit_fast = first_token in ("信用购", "信用买")
-        if credit_fast:
-            text = re.sub(r"^\S+\s+", "", text, count=1).strip()
-        # 批量正则（一句含多个金额，如“午餐30晚餐45打车12”；信用购不支持批量）
+        # 批量正则（一句含多个金额，如“午餐30晚餐45打车12”）
         try:
             batch, _ = parse_bills_batch(text)
-            if batch and len(batch) > 1 and not credit_fast:
+            if batch and len(batch) > 1:
                 for item in batch:
                     self._apply_bill_defaults(item)
                 self._sessions[user_id] = Session("bill_batch", {"items": batch})
@@ -757,23 +692,7 @@ class BlogWriter(Star):
         if parsed is None:
             return event.plain_result("账单解析失败：{}，请重发或发 /取消。".format(err))
         self._apply_bill_defaults(parsed)
-        if credit_fast:
-            parsed["credit_split"] = True
-            parsed["type"] = "expense"
-            parsed["amount"] = -abs(parsed.get("amount", 0))
         sess = Session("bill", parsed)
-        if credit_fast:
-            # 信用账户已知则直接就绪，否则只问账户
-            acc = str(parsed.get("account") or "其他")
-            if acc in BILL_WIZARD_LIABILITY_ACCOUNTS:
-                self._sessions[user_id] = sess
-                return event.plain_result(self._bill_confirm_text(sess))
-            sess.wizard = {"step": "bill_pick_credit_account"}
-            self._sessions[user_id] = sess
-            return event.plain_result(
-                format_choices("用的哪个信用账户？", BILL_WIZARD_LIABILITY_ACCOUNTS, with_skip_cancel=False)
-                + "\n也可直接回复账户名（如：花呗）"
-            )
         # 进入账单向导：让用户确认类型
         t = parsed.get("type")
         label = self._BILL_TYPE_LABELS.get(t, t)
@@ -784,7 +703,7 @@ class BlogWriter(Star):
                 parsed.get("title"), parsed.get("amount"), label, parsed.get("category"), parsed.get("account")
             )
             + self._bill_type_prompt()
-            + f"\n\n当前猜测：{label}（选对应数字，或 5 直接发布）"
+            + f"\n\n当前猜测：{label}（选对应数字，或 3 直接发布）"
         )
 
     def _apply_schedule_defaults(self, item: Dict) -> None:
@@ -1313,9 +1232,6 @@ class BlogWriter(Star):
                                 return
                             if m_cat:
                                 cat = m_cat.group(1)
-                                if session.meta.get("type") == "liability":
-                                    yield event.plain_result("负债的分类固定为「负债」，无需修改。")
-                                    return
                                 if cat not in BILL_CATEGORIES:
                                     yield event.plain_result(
                                         "分类「{}」不在白名单，可选：{}。".format(cat, "、".join(BILL_CATEGORIES))
@@ -1809,74 +1725,6 @@ class BlogWriter(Star):
             elif session.kind == "bill":
                 if not session.meta or session.meta.get("amount") is None:
                     return event.plain_result("账单信息不完整，请先发送账单内容（如：今天午餐微信花了32）。")
-                if session.meta.get("repay_split"):
-                    # 还债：一键拆两笔 —— 支出(还款) + 负债减少
-                    fund = str(session.meta.get("_repay_fund_account") or "微信")
-                    la = str(session.meta.get("account") or session.meta.get("_repay_liability_account") or "花呗")
-                    title = str(session.meta.get("title") or "账单").strip() or "还款"
-                    amt = abs(session.meta.get("amount", 0))
-                    expense_item = {
-                        "title": title,
-                        "amount": -amt,
-                        "type": "expense",
-                        "category": "还款",
-                        "account": fund,
-                        "date": session.meta.get("date"),
-                        "description": str(session.meta.get("description") or title),
-                    }
-                    liability_item = {
-                        "title": "{}还款".format(la),
-                        "amount": -amt,
-                        "type": "liability",
-                        "category": "负债",
-                        "account": la,
-                        "date": session.meta.get("date"),
-                        "description": "还款：{}（{} 垫付）".format(str(session.meta.get("description") or title), fund),
-                    }
-                    ok1, p1, err1 = await self._commit_md(
-                        "src/content/bills/{}-{}.md".format(now.strftime("%Y-%m-%d"), clean_filename_part(title)),
-                        build_bill_md(expense_item, now), now)
-                    ok2, p2, err2 = await self._commit_md(
-                        "src/content/bills/{}-{}.md".format(now.strftime("%Y-%m-%d"), clean_filename_part(f"{title}{la}还款")),
-                        build_bill_md(liability_item, now), now)
-                    self._sessions.pop(user_id, None)
-                    if not ok1 or not ok2:
-                        detail = "；".join(x for x, ok in ((err1, ok1), (err2, ok2)) if not ok)
-                        return event.plain_result("还债发布失败：{}（支出{}、负债{}），请检查后重试或手动补录。".format(
-                            detail, "成功" if ok1 else "失败", "成功" if ok2 else "失败"))
-                    return event.plain_result(
-                        "还债发布成功 ✅ 共 2 笔：\n① 支出：{} -{}（账户{} 分类还款）\n② 负债：{} -{}（减少负债）\n文件：{}\n{}".format(
-                            title, amt, fund, la, amt, p1, p2))
-                if session.meta.get("credit_split"):
-                    # 信用购：一键拆两笔 —— 支出（消费）+ 负债（信用账户新增欠款）
-                    credit_acct = str(session.meta.get("account") or "花呗")
-                    title = str(session.meta.get("title") or "账单").strip() or "账单"
-                    amt = abs(session.meta.get("amount", 0))
-                    expense_item = dict(session.meta)
-                    expense_item.update({"type": "expense", "amount": -amt, "account": credit_acct})
-                    liability_item = {
-                        "title": "{}消费".format(credit_acct),
-                        "amount": amt,
-                        "type": "liability",
-                        "category": "负债",
-                        "account": credit_acct,
-                        "date": session.meta.get("date"),
-                        "description": "信用消费：{}".format(str(session.meta.get("description") or title)),
-                    }
-                    ok1, p1, err1 = await self._commit_md(
-                        "src/content/bills/{}-{}.md".format(now.strftime("%Y-%m-%d"), clean_filename_part(title)),
-                        build_bill_md(expense_item, now), now)
-                    ok2, p2, err2 = await self._commit_md(
-                        "src/content/bills/{}-{}.md".format(now.strftime("%Y-%m-%d"), clean_filename_part(liability_item["title"])),
-                        build_bill_md(liability_item, now), now)
-                    self._sessions.pop(user_id, None)
-                    if not ok1 or not ok2:
-                        detail = "；".join(x for x, ok in ((err1, ok1), (err2, ok2)) if not ok)
-                        return event.plain_result("信用购发布失败：{}（支出{}、负债{}），请检查后重试或手动补录。".format(
-                            detail, "成功" if ok1 else "失败", "成功" if ok2 else "失败"))
-                    return event.plain_result(
-                        "信用购发布成功 ✅ 共 2 笔：\n① 支出：{} -{}（账户{}）\n② 负债：{}消费 +{}\n文件：{}\n{}".format(
-                            title, amt, credit_acct, credit_acct, amt, p1, p2))
                 md = build_bill_md(session.meta, now)
                 title = str(session.meta.get("title") or "账单").strip() or "账单"
                 slug = clean_filename_part(title)
@@ -2667,8 +2515,6 @@ class BlogWriter(Star):
             m_acc_early = re.match(r"^(?:账户|账号|account)\s*[:：]?\s*(\S{1,10})\s*$", text)
             if m_cat_early:
                 cat = m_cat_early.group(1)
-                if sess.meta.get("type") == "liability":
-                    return event.plain_result("负债的分类固定为「负债」，无需修改。")
                 if cat not in BILL_CATEGORIES:
                     return event.plain_result("分类「{}」不在白名单，可选：{}。".format(cat, "、".join(BILL_CATEGORIES)))
                 sess.meta["category"] = cat
@@ -2681,32 +2527,17 @@ class BlogWriter(Star):
                 sess.touch()
                 return event.plain_result("已修改账户：{}。当前账单：{} 金额{}，分类{}，账户{}。发 /发布 提交。".format(
                     acc, sess.meta.get("title"), sess.meta.get("amount"), sess.meta.get("category"), sess.meta.get("account")))
-            choice = parse_choice(text, 7)
+            choice = parse_choice(text, 4)
             if choice is not None:
-                if choice == 5:  # 直接发布
+                if choice == 3:  # 直接发布
                     sess.wizard = None
                     sess.touch()
                     return event.plain_result(self._bill_confirm_text(sess))
-                if choice == 6:  # 重说
+                if choice == 4:  # 重说
                     sess.wizard = {"step": "bill_reinput"}
                     sess.touch()
                     return event.plain_result("请重新发送账单内容（如：午餐30 / 发工资5000 / 花呗还款200），发“取消”退出。")
-                if choice == 7:  # 信用购：一键拆 支出+负债
-                    sess.meta["credit_split"] = True
-                    sess.meta["type"] = "expense"
-                    sess.meta["amount"] = -abs(sess.meta.get("amount", 0))
-                    acc = str(sess.meta.get("account") or "其他")
-                    if acc in BILL_WIZARD_LIABILITY_ACCOUNTS:
-                        sess.wizard = None
-                        sess.touch()
-                        return event.plain_result(self._bill_confirm_text(sess))
-                    sess.wizard = {"step": "bill_pick_credit_account"}
-                    sess.touch()
-                    return event.plain_result(
-                        format_choices("用的哪个信用账户？", BILL_WIZARD_LIABILITY_ACCOUNTS, with_skip_cancel=False)
-                        + "\n也可直接回复账户名（如：花呗）"
-                    )
-                mapping = {1: "expense", 2: "income", 3: "liability_borrow", 4: "liability_repay"}
+                mapping = {1: "expense", 2: "income"}
                 picked = mapping.get(choice)
                 if picked == "expense":
                     sess.meta["type"] = "expense"
@@ -2714,31 +2545,6 @@ class BlogWriter(Star):
                 elif picked == "income":
                     sess.meta["type"] = "income"
                     sess.meta["amount"] = abs(sess.meta.get("amount", 0))
-                elif picked == "liability_borrow":
-                    sess.meta["type"] = "liability"
-                    sess.meta["amount"] = abs(sess.meta.get("amount", 0))
-                    sess.meta["category"] = "负债"
-                elif picked == "liability_repay":
-                    # 还债固定拆两笔：支出(还款) + 负债(-)
-                    # 先记负债账户（当前 account），追问资金来源账户
-                    sess.meta["type"] = "liability"
-                    sess.meta["category"] = "负债"
-                    sess.meta["amount"] = -abs(sess.meta.get("amount", 0))
-                    # 把当前负债账户暂存到 meta.repay_liability_account，资金来源问完后两者都清楚
-                    la = str(sess.meta.get("account") or "其他")
-                    if la in BILL_ACCOUNTS and la not in BILL_WIZARD_LIABILITY_ACCOUNTS:
-                        la = "其他"
-                    sess.meta["_repay_liability_account"] = la
-                    sess.wizard = {"step": "bill_pick_repay_fund"}
-                    sess.touch()
-                    return event.plain_result(
-                        format_choices(
-                            "用哪个账户的钱还？（资金从哪里扣）",
-                            BILL_ACCOUNTS,
-                            with_skip_cancel=False,
-                        )
-                        + "\n也可直接回复账户名（如：微信）"
-                    )
                 # 后续步骤：已识别的字段直接跳过，只问缺失的
                 nxt = self._bill_next_step(sess)
                 if nxt is None:
@@ -2748,16 +2554,13 @@ class BlogWriter(Star):
                 sess.wizard = {"step": nxt}
                 sess.touch()
                 return event.plain_result(self._bill_step_prompt(nxt))
-            return event.plain_result("请回复数字 1-7 选择：\n" + self._bill_type_prompt())
+            return event.plain_result("请回复数字 1-4 选择：\n" + self._bill_type_prompt())
 
         if step == "bill_reinput":
             parsed, err = parse_bill(text)
             if parsed is None:
                 return event.plain_result("账单解析失败：{}，请重发或发“取消”。".format(err))
-            credit_flag = bool(sess.meta.get("credit_split"))
             sess.meta.update(parsed)
-            if credit_flag:
-                sess.meta["credit_split"] = True
             self._apply_bill_defaults(parsed)
             sess.touch()
             sess.wizard = {"step": "bill_confirm_type"}
@@ -2797,58 +2600,6 @@ class BlogWriter(Star):
             sess.touch()
             return event.plain_result(self._bill_confirm_text(sess))
 
-        if step == "bill_pick_credit_account":
-            choice = parse_choice(text, len(BILL_WIZARD_LIABILITY_ACCOUNTS))
-            if choice is not None:
-                sess.meta["account"] = BILL_WIZARD_LIABILITY_ACCOUNTS[choice - 1]
-            elif text and 1 <= len(text.strip()) <= 10:
-                sess.meta["account"] = text.strip()
-            else:
-                return event.plain_result("请回复数字选择信用账户，或直接发账户名：\n" + format_choices("用的哪个信用账户？", BILL_WIZARD_LIABILITY_ACCOUNTS, with_skip_cancel=False))
-            sess.wizard = None
-            sess.touch()
-            return event.plain_result(self._bill_confirm_text(sess))
-
-        if step == "bill_pick_repay_account":
-            # 保留：旧的“还债账户”步骤（现由 bill_pick_repay_fund 替代，遗留兼容）
-            choice = parse_choice(text, len(BILL_WIZARD_LIABILITY_ACCOUNTS))
-            if choice is not None:
-                sess.meta["account"] = BILL_WIZARD_LIABILITY_ACCOUNTS[choice - 1]
-            elif text and 1 <= len(text.strip()) <= 10:
-                sess.meta["account"] = text.strip()
-            else:
-                return event.plain_result("请选择还款账户：\n" + format_choices("还款到哪个账户？", BILL_WIZARD_LIABILITY_ACCOUNTS, with_skip_cancel=False))
-            sess.wizard = None
-            sess.touch()
-            return event.plain_result(self._bill_confirm_text(sess))
-
-        if step == "bill_pick_repay_fund":
-            # 还债：追问资金来源账户，完成后标记 repay_split
-            choice = parse_choice(text, len(BILL_ACCOUNTS))
-            if choice is not None:
-                fund = BILL_ACCOUNTS[choice - 1]
-            elif text and 1 <= len(text.strip()) <= 10:
-                fund = text.strip()
-            else:
-                return event.plain_result(
-                    "请回复数字选择用哪个账户付钱，或直接发账户名：\n"
-                    + format_choices(
-                        "用哪个账户的钱还？（资金从哪里扣）",
-                        BILL_ACCOUNTS,
-                        with_skip_cancel=False,
-                    )
-                )
-            la = str(sess.meta.get("_repay_liability_account") or sess.meta.get("account") or "花呗")
-            if la not in BILL_WIZARD_LIABILITY_ACCOUNTS:
-                if la in BILL_ACCOUNTS and la not in BILL_WIZARD_LIABILITY_ACCOUNTS:
-                    la = "花呗" if la == "其他" else la
-            sess.meta["account"] = la  # 负债账户
-            sess.meta["_repay_fund_account"] = fund  # 资金来源
-            sess.meta["repay_split"] = True
-            sess.wizard = None
-            sess.touch()
-            return event.plain_result(self._bill_confirm_text(sess))
-
         return None
 
     # ---------- 其他 ----------
@@ -2872,9 +2623,8 @@ class BlogWriter(Star):
             "———— 💰 记生活 ————\n"
             "/账单 午餐微信花了32\n"
             "　确认类型后发布；分类账户已识别则免问\n"
-            "/账单 信用购 花呗 午餐30\n"
-            "　花呗/白条买东西一键记 2 笔：\n"
-            "　支出-30 + 负债+30，不再记两次\n"
+            "/账单 花呗还款200\n"
+            "　还款自动记为支出，分类「还款」\n"
             "/日程 明天3点在A开会 每周\n"
             "　支持优先级、提前15分钟提醒\n"
             "/生日 我的农历8.24\n"

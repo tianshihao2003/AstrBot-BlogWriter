@@ -856,29 +856,19 @@ class TestBillSchedule(unittest.TestCase):
         # 全天生日不调度提醒
         self.assertEqual(len(self.plugin.scheduled), 0)
 
-    def test_start_bill_liability_and_publish(self):
-        # /账单 负债 前缀 + 借入为正；发布后 md 对齐博客负债格式（type liability、tags 负债）
+    def test_start_bill_borrow_rejected(self):
+        # 负债类型已下线：借款/欠款解析报错，不创建会话
         replies = asyncio.get_event_loop().run_until_complete(self._send("/账单 负债 花呗借款5000"))
-        self.assertTrue(any("已识别" in r for r in replies))
-        sess = self.plugin._sessions.get("u1")
-        self.assertEqual(sess.meta.get("type"), "liability")
-        self.assertEqual(sess.meta.get("amount"), 5000)
-        self.assertEqual(sess.meta.get("account"), "花呗")
-        replies = asyncio.get_event_loop().run_until_complete(self._send("/发布"))
-        self.assertTrue(any("发布成功" in r for r in replies))
-        path, md = self.plugin.committed[0]
-        self.assertTrue(path.startswith("src/content/bills/"))
-        self.assertIn('type: "liability"', md)
-        self.assertIn("amount: 5000", md)
-        self.assertIn('category: "负债"', md)
-        self.assertIn('tags: ["负债"]', md)
+        self.assertTrue(any("负债类型已下线" in r for r in replies))
+        self.assertNotIn("u1", self.plugin._sessions)
 
-    def test_start_bill_liability_repay_keyword(self):
-        # 自然语言「还款」→ 负数负债
+    def test_start_bill_repay_keyword_as_expense(self):
+        # 自然语言「还款」→ 记为支出（分类「还款」）
         replies = asyncio.get_event_loop().run_until_complete(self._send("/账单 花呗还款2000"))
         sess = self.plugin._sessions.get("u1")
-        self.assertEqual(sess.meta.get("type"), "liability")
+        self.assertEqual(sess.meta.get("type"), "expense")
         self.assertEqual(sess.meta.get("amount"), -2000)
+        self.assertEqual(sess.meta.get("category"), "还款")
 
     def test_bill_session_modify_category_account(self):
         # 识别后 /发布 前可手动改分类与账户
@@ -1507,47 +1497,29 @@ class TestWizardFlow(unittest.TestCase):
         self.assertTrue(any("已确认" in r for r in replies))
         self.assertFalse(any("请选择" in r for r in replies))
 
-    def test_bill_wizard_repay_requires_fund(self):
-        # 还款且账户已识别（花呗）→ 选 4 后不再直接确认，而是追问资金来源
+    def test_bill_wizard_repay_direct_confirm(self):
+        # 还款解析为支出后（分类「还款」、账户「花呗」已识别）→ 选 1 后直接确认
         asyncio.get_event_loop().run_until_complete(self._send("/账单 花呗还款200"))
-        replies = asyncio.get_event_loop().run_until_complete(self._send("4"))
-        self.assertTrue(any("用哪个账户的钱还" in r for r in replies))
+        replies = asyncio.get_event_loop().run_until_complete(self._send("1"))
+        self.assertTrue(any("已确认" in r for r in replies))
         sess = self.plugin._sessions.get("u1")
+        self.assertEqual(sess.meta.get("type"), "expense")
+        self.assertEqual(sess.meta.get("category"), "还款")
         self.assertEqual(sess.meta.get("account"), "花呗")
         self.assertEqual(sess.meta.get("amount"), -200)
-        # 选择资金来源 → 还债确认两笔提示
-        replies = asyncio.get_event_loop().run_until_complete(self._send("1"))
-        self.assertTrue(any("还债已确认" in r for r in replies))
-        self.assertTrue(sess.meta.get("repay_split"))
-        self.assertEqual(sess.meta.get("_repay_fund_account"), "微信")
-        self.assertEqual(sess.meta.get("_repay_liability_account"), "花呗")
 
-    def test_bill_repay_publish_splits_two(self):
-        # 还债提交：用微信还花呗200 → 提交两笔（支出 -200 还款 + 负债 -200）
+    def test_bill_repay_publish_single(self):
+        # 还款提交：单笔支出（分类还款、账户花呗），不再拆两笔
         asyncio.get_event_loop().run_until_complete(self._send("/账单 花呗还款200"))
-        asyncio.get_event_loop().run_until_complete(self._send("4"))
         asyncio.get_event_loop().run_until_complete(self._send("1"))
         replies = asyncio.get_event_loop().run_until_complete(self._send("/发布"))
-        self.assertTrue(any("还债发布成功" in r for r in replies))
-        self.assertEqual(len(self.plugin.committed), 2)
-        expense_md = next(md for p, md in self.plugin.committed if "花呗还款" in p)
-        liability_md = next(md for p, md in self.plugin.committed if "花呗还款花呗还款" in p or ("amount: -200" in md and "category" in md and len(self.plugin.committed) == 2))
-        # 更可靠：按 type 区分
-        expense_found = None
-        liability_found = None
-        for _p, md in self.plugin.committed:
-            if 'type: "liability"' in md and "花呗" in md:
-                liability_found = md
-            elif 'type: "expense"' in md:
-                expense_found = md
-        self.assertIsNotNone(expense_found)
-        self.assertIsNotNone(liability_found)
-        self.assertIn("amount: -200", expense_found)
-        self.assertIn('category: "还款"', expense_found)
-        self.assertIn('account: "微信"', expense_found)
-        self.assertIn("amount: -200", liability_found)
-        self.assertIn('category: "负债"', liability_found)
-        self.assertIn('account: "花呗"', liability_found)
+        self.assertTrue(any("发布成功" in r for r in replies))
+        self.assertEqual(len(self.plugin.committed), 1)
+        _path, md = self.plugin.committed[0]
+        self.assertIn('type: "expense"', md)
+        self.assertIn("amount: -200", md)
+        self.assertIn('category: "还款"', md)
+        self.assertIn('account: "花呗"', md)
 
     def test_bill_empty_session_then_text_enters_wizard(self):
         # /账单 空会话 → 补发内容 → 也应进入类型确认向导（与带参路径统一）
@@ -1557,39 +1529,26 @@ class TestWizardFlow(unittest.TestCase):
         sess = self.plugin._sessions.get("u1")
         self.assertEqual(sess.meta.get("amount"), -30)
 
-    def test_bill_credit_fast_track_publish(self):
-        # 信用购快车道：一句话 → 发布拆两笔（支出-30 花呗 + 负债+30 花呗）
+    def test_bill_credit_purchase_now_single_expense(self):
+        # 信用购功能已移除：一句话只当普通支出解析，不再拆两笔
         replies = asyncio.get_event_loop().run_until_complete(self._send("/账单 信用购 花呗 午餐30"))
-        self.assertTrue(any("信用购已确认" in r for r in replies))
-        replies = asyncio.get_event_loop().run_until_complete(self._send("/发布"))
-        self.assertTrue(any("信用购发布成功" in r for r in replies))
-        self.assertEqual(len(self.plugin.committed), 2)
-        paths = [p for p, _md in self.plugin.committed]
-        self.assertTrue(any("午餐" in p for p in paths))
-        self.assertTrue(any("花呗消费" in p for p in paths))
-        expense_md = next(md for p, md in self.plugin.committed if "午餐" in p)
-        liability_md = next(md for p, md in self.plugin.committed if "花呗消费" in p)
-        self.assertIn("amount: -30", expense_md)
-        self.assertIn('account: "花呗"', expense_md)
-        self.assertIn("amount: 30", liability_md)
-        self.assertIn('type: "liability"', liability_md)
-        self.assertIn('category: "负债"', liability_md)
+        self.assertTrue(any("请确认类型" in r for r in replies))
+        self.assertFalse(any("信用购已确认" in r for r in replies))
+        sess = self.plugin._sessions.get("u1")
+        self.assertEqual(sess.meta.get("type"), "expense")
+        self.assertEqual(sess.meta.get("amount"), -30)
+        self.assertEqual(sess.meta.get("account"), "花呗")
 
-    def test_bill_credit_via_wizard(self):
-        # 向导选 7 信用购 → 问账户 → 回花呗 → 发布拆两笔
+    def test_bill_credit_option_removed(self):
+        # 向导选项 7 已不存在：回复 7 提示 1-4
         asyncio.get_event_loop().run_until_complete(self._send("/账单 午餐30"))
         replies = asyncio.get_event_loop().run_until_complete(self._send("7"))
-        self.assertTrue(any("信用账户" in r for r in replies))
-        replies = asyncio.get_event_loop().run_until_complete(self._send("花呗"))
-        self.assertTrue(any("信用购已确认" in r for r in replies))
-        replies = asyncio.get_event_loop().run_until_complete(self._send("/发布"))
-        self.assertTrue(any("信用购发布成功" in r for r in replies))
-        self.assertEqual(len(self.plugin.committed), 2)
+        self.assertTrue(any("1-4" in r for r in replies))
 
     def test_bill_wizard_reinput(self):
-        # 选 6 重说 → 重新发内容 → 回到类型确认
+        # 选 4 重说 → 重新发内容 → 回到类型确认
         asyncio.get_event_loop().run_until_complete(self._send("/账单 午餐30"))
-        replies = asyncio.get_event_loop().run_until_complete(self._send("6"))
+        replies = asyncio.get_event_loop().run_until_complete(self._send("4"))
         self.assertTrue(any("重新发送账单内容" in r for r in replies))
         replies = asyncio.get_event_loop().run_until_complete(self._send("发工资5000 银行卡"))
         self.assertTrue(any("已重新识别" in r for r in replies))

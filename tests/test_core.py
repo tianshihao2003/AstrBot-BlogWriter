@@ -578,20 +578,19 @@ class TestBillSchedule(unittest.TestCase):
         self.assertEqual(data["type"], "income")
         self.assertEqual(data["amount"], 12000)
 
-    def test_parse_bill_liability_borrow(self):
-        # 负债借入：正数（对齐博客 bill-adapter：liability += amount）
+    def test_parse_bill_borrow_rejected(self):
+        # 负债类型已下线（博客账单仅支持 支出/收入）：借款/欠款返回错误
         data, err = parse_bill("花呗借款5000")
-        self.assertEqual(err, "")
-        self.assertEqual(data["type"], "liability")
-        self.assertEqual(data["amount"], 5000)
-        self.assertEqual(data["category"], "负债")
-        self.assertEqual(data["account"], "花呗")
+        self.assertIsNone(data)
+        self.assertIn("负债类型已下线", err)
 
-    def test_parse_bill_liability_repay(self):
-        # 负债还款：负数（减少负债）
-        data, _ = parse_bill("花呗还款2000")
-        self.assertEqual(data["type"], "liability")
+    def test_parse_bill_repay_as_expense(self):
+        # 还款 = 资金流出，记为普通支出（分类「还款」，金额为负）
+        data, err = parse_bill("花呗还款2000")
+        self.assertEqual(err, "")
+        self.assertEqual(data["type"], "expense")
         self.assertEqual(data["amount"], -2000)
+        self.assertEqual(data["category"], "还款")
         self.assertEqual(data["account"], "花呗")
 
     def test_parse_bill_type_prefix(self):
@@ -602,14 +601,11 @@ class TestBillSchedule(unittest.TestCase):
         data2, _ = parse_bill("收入 兼职到手800 支付宝")
         self.assertEqual(data2["type"], "income")
         self.assertEqual(data2["amount"], 800)
-        data3, _ = parse_bill("负债 白条借款300")
-        self.assertEqual(data3["type"], "liability")
-        self.assertEqual(data3["amount"], 300)
-        self.assertEqual(data3["account"], "白条")
-        # 前缀 + 还款 → 负
-        data4, _ = parse_bill("负债 花呗还款2000")
-        self.assertEqual(data4["type"], "liability")
-        self.assertEqual(data4["amount"], -2000)
+        # 「还款」前缀 → 支出、分类固定「还款」
+        data3, _ = parse_bill("还款 2000 微信")
+        self.assertEqual(data3["type"], "expense")
+        self.assertEqual(data3["amount"], -2000)
+        self.assertEqual(data3["category"], "还款")
 
     def test_parse_bill_prefix_word_alone_not_stripped(self):
         # 「消费」后无空格内容时（如「消费30」），不作为前缀剥离，按关键词正常解析
