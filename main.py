@@ -672,7 +672,6 @@ class BlogWriter(Star):
                 "账单会话已创建，请发送账单内容，发 /发布 提交，发 /取消 放弃。\n"
                 "支出：今天午餐微信花了32（或首词「支出」显式指定）\n"
                 "收入：发工资12000 银行卡（或首词「收入」）\n"
-                "还款：花呗还款2000（自动记为支出，分类「还款」）\n"
                 "批量：午餐30晚餐45打车12"
             )
         # 批量正则（一句含多个金额，如“午餐30晚餐45打车12”）
@@ -2536,7 +2535,7 @@ class BlogWriter(Star):
                 if choice == 4:  # 重说
                     sess.wizard = {"step": "bill_reinput"}
                     sess.touch()
-                    return event.plain_result("请重新发送账单内容（如：午餐30 / 发工资5000 / 花呗还款200），发“取消”退出。")
+                    return event.plain_result("请重新发送账单内容（如：午餐30 / 发工资5000），发“取消”退出。")
                 mapping = {1: "expense", 2: "income"}
                 picked = mapping.get(choice)
                 if picked == "expense":
@@ -2623,8 +2622,6 @@ class BlogWriter(Star):
             "———— 💰 记生活 ————\n"
             "/账单 午餐微信花了32\n"
             "　确认类型后发布；分类账户已识别则免问\n"
-            "/账单 花呗还款200\n"
-            "　还款自动记为支出，分类「还款」\n"
             "/日程 明天3点在A开会 每周\n"
             "　支持优先级、提前15分钟提醒\n"
             "/生日 我的农历8.24\n"
