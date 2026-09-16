@@ -60,6 +60,7 @@
 | friend_default_avatar | 友链默认头像（未提供头像链接时），默认 `/assets/ziyuan/tx.webp` |
 | friend_tags | 友链默认标签，默认 `["Blog"]` |
 | allow_users | 允许使用的用户 ID 列表（个人微信为 `xxx@im.wechat` 格式）；空列表 = 全部拒绝 |
+| allow_groups | 允许交互的群号列表（QQ 群号）；留空 = 不限制群；填了以后列表外的群一律静默 |
 | bill_default_account / bill_default_category | 账单默认账户/分类（解析为「其他」时替换） |
 | schedule_default_priority / schedule_remind_before | 日程默认优先级/默认提前提醒分钟（0=准点） |
 
@@ -125,6 +126,8 @@
 - 命令/会话消息处理后调用 `stop_event` 阻断事件传播（符合官方规范，避免 LLM 对同一条消息重复回复）；无关消息放行不阻断
 - 日程提醒持久化自 v1.0.49 起存 AstrBot 根 `data/plugin_data/blog_writer/`（官方规范：防插件重装覆盖）；升级后自动读旧插件目录文件迁移，无需手动搬
 - 插件卸载/重载时 `terminate()` 会关闭 httpx 客户端与 APScheduler，避免调度器残留
+- 群聊不主动插嘴：白名单用户「无会话发图提示」仅在**私聊**生效；配置 `allow_groups` 后（非空），不在列表内的群完全静默（含命令）
+- `allow_groups` 与 `allow_users` 是两层控制：前者管「哪个群」，后者管「哪个人」；私聊只受 allow_users 约束
 
 ## 测试
 

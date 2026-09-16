@@ -576,7 +576,7 @@ class TestFlow(unittest.TestCase):
             tmp.unlink(missing_ok=True)
 
     def test_whitelisted_image_without_session_hint(self):
-        """白名单用户无会话发图片才提示（媒体不被静默丢弃）。"""
+        """白名单用户**私聊**无会话发图片才提示（媒体不被静默丢弃）。"""
         from astrbot.api.message_components import Image
         from pathlib import Path
 
@@ -590,6 +590,85 @@ class TestFlow(unittest.TestCase):
             self.assertIn("没有进行中的会话", replies[0])
         finally:
             tmp.unlink(missing_ok=True)
+
+    def test_group_image_no_hint(self):
+        """回归（2026-09-15）：白名单用户在群里无会话发图片 → 不插嘴（提示仅私聊）。"""
+        from astrbot.api.message_components import Image
+        from pathlib import Path
+
+        tmp = Path(os.environ.get("TEMP", ".")) / "blogwriter_group.png"
+        tmp.write_bytes(b"fake")
+        try:
+            ev = types.SimpleNamespace(
+                message_str="",
+                get_sender_id=lambda: "u1",
+                get_sender_name=lambda: "用户",
+                get_messages=lambda: [Image(file=str(tmp))],
+                plain_result=lambda t: types.SimpleNamespace(text=t),
+                message_obj=types.SimpleNamespace(raw_message={}),
+                unified_msg_origin="aiocqhttp:GroupMessage:238954530",
+                get_group_id=lambda: "238954530",
+            )
+
+            async def run():
+                out = []
+                async for r in self.plugin.on_message(ev):
+                    out.append(r)
+                return out
+
+            replies = asyncio.get_event_loop().run_until_complete(run())
+            self.assertEqual(len(replies), 0)
+        finally:
+            tmp.unlink(missing_ok=True)
+
+    def test_allow_groups_blocks_unlisted_group(self):
+        """allow_groups 非空：列表外的群完全静默（含命令）。"""
+        self.plugin.config["allow_groups"] = ["111111"]
+        ev = types.SimpleNamespace(
+            message_str="/动态 测试",
+            get_sender_id=lambda: "u1",
+            get_sender_name=lambda: "用户",
+            get_messages=lambda: [],
+            plain_result=lambda t: types.SimpleNamespace(text=t),
+            unified_msg_origin="aiocqhttp:GroupMessage:238954530",
+            get_group_id=lambda: "238954530",
+        )
+
+        async def run():
+            out = []
+            async for r in self.plugin.on_message(ev):
+                out.append(r)
+            return out
+
+        replies = asyncio.get_event_loop().run_until_complete(run())
+        self.assertEqual(len(replies), 0)
+        self.assertNotIn("u1", self.plugin._sessions)
+
+    def test_allow_groups_allows_listed_group(self):
+        """allow_groups 非空：列表内的群正常交互，私聊不受影响。"""
+        self.plugin.config["allow_groups"] = ["238954530"]
+        ev = types.SimpleNamespace(
+            message_str="/动态 测试",
+            get_sender_id=lambda: "u1",
+            get_sender_name=lambda: "用户",
+            get_messages=lambda: [],
+            plain_result=lambda t: types.SimpleNamespace(text=t),
+            unified_msg_origin="aiocqhttp:GroupMessage:238954530",
+            get_group_id=lambda: "238954530",
+        )
+
+        async def run():
+            out = []
+            async for r in self.plugin.on_message(ev):
+                out.append(r.text)
+            return out
+
+        replies = asyncio.get_event_loop().run_until_complete(run())
+        self.assertEqual(len(replies), 1)
+        self.assertIn("动态已创建", replies[0])
+        # 私聊不受 allow_groups 限制
+        replies2 = asyncio.get_event_loop().run_until_complete(self._send("/取消"))
+        self.assertTrue(any("已取消" in r for r in replies2))
 
     def test_command_stops_event(self):
         """官方规范：命令被插件完整消费后必须 stop_event，阻断 LLM 阶段重复回复。"""

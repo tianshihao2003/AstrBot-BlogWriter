@@ -503,6 +503,48 @@ class BlogWriter(Star):
         return user_id in [str(x).strip() for x in allow]
 
     @staticmethod
+    def _is_group_message(event: AstrMessageEvent) -> bool:
+        """判断消息是否来自群聊。
+
+        优先解析 unified_msg_origin 类型段（如 aiocqhttp:GroupMessage:123456），
+        其次探测 get_group_id()。识别不出时按私聊处理（宁可提示也不丢消息）。
+        """
+        try:
+            origin = str(getattr(event, "unified_msg_origin", "") or "")
+            if "GroupMessage" in origin:
+                return True
+            if "FriendMessage" in origin or "PrivateMessage" in origin:
+                return False
+            getter = getattr(event, "get_group_id", None)
+            if callable(getter):
+                if str(getter() or "").strip():
+                    return True
+        except Exception:
+            pass
+        return False
+
+    def _group_allowed(self, event: AstrMessageEvent) -> bool:
+        """群聊白名单：allow_groups 为空 → 不限制（保持既有行为）；
+        非空 → 仅列表内的群可交互，其余群完全静默（含命令）。"""
+        allow = self._cfg("allow_groups") or []
+        if not allow:
+            return True
+        allowed = [str(x).strip() for x in allow if str(x).strip()]
+        gid = ""
+        try:
+            getter = getattr(event, "get_group_id", None)
+            if callable(getter):
+                gid = str(getter() or "").strip()
+        except Exception:
+            gid = ""
+        if not gid:
+            origin = str(getattr(event, "unified_msg_origin", "") or "")
+            parts = origin.split(":")
+            if len(parts) >= 3 and "GroupMessage" in origin:
+                gid = parts[-1].strip()
+        return bool(gid) and gid in allowed
+
+    @staticmethod
     def _merge_tags(default_tags, extra) -> List[str]:
         """默认标签 + 自定义标签，保持顺序并去重。"""
         result = [str(t).strip() for t in (default_tags or []) if str(t).strip()]
@@ -1022,11 +1064,18 @@ class BlogWriter(Star):
                 )
                 return
 
+            # 群聊白名单：配置了 allow_groups 后，列表外的群完全静默（含命令）
+            if self._is_group_message(event) and not self._group_allowed(event):
+                logger.info("BlogWriter: 群消息不在 allow_groups 白名单，已忽略 user=%s origin=%s",
+                            user_id, getattr(event, "unified_msg_origin", ""))
+                return
+
             # 与博客无关的消息（非命令、无进行中会话）一律放行，绝不回复
             if cmd not in COMMANDS and not session:
-                # 例外：白名单用户无会话时收到图片/视频 → 提示，避免媒体被静默丢弃
-                if self._extract_images(event, allow_video=True):
-                    logger.info("BlogWriter: 用户 %s 无会话时发送媒体，已提示", user_id)
+                # 例外：白名单用户**私聊**无会话时收到图片/视频 → 提示，避免媒体被静默丢弃；
+                # 群聊里一律不插嘴（2026-09-15：群里随手发图被提示刷屏）
+                if not self._is_group_message(event) and self._extract_images(event, allow_video=True):
+                    logger.info("BlogWriter: 用户 %s 私聊无会话发送媒体，已提示", user_id)
                     # 本条消息已被插件完整消费，阻断传播（否则 LLM 阶段还会再收到）
                     _stop = getattr(event, "stop_event", None)
                     if callable(_stop):

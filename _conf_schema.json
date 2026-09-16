@@ -99,6 +99,11 @@
     "type": "list",
     "default": []
   },
+  "allow_groups": {
+    "description": "允许交互的群号列表（QQ 群号）；留空 = 不限制群（但无会话图片提示仅私聊生效）。填了以后，不在列表内的群一律静默（含命令）",
+    "type": "list",
+    "default": []
+  },
   "bill_default_account": {
     "description": "账单默认账户",
     "type": "string",
