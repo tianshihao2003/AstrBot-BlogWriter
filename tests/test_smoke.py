@@ -1767,5 +1767,126 @@ class TestWizardFlow(unittest.TestCase):
         self.assertIsNone(self.plugin._sessions["u1"].wizard)
 
 
+try:
+    from tests.test_core import WX_ARTICLE_HTML
+except ImportError:  # unittest discover -s tests 模式
+    from test_core import WX_ARTICLE_HTML
+
+
+class TestArticleFlow(unittest.TestCase):
+    """微信公众号转载：/转载 链接 → 抓取 → 图片转存图床 → 生成 posts 文章 → 提交。"""
+
+    def setUp(self):
+        self.config = {
+            "github_token": "tok",
+            "github_repo": "tianshihao2003/dumplingandcakeblog",
+            "github_branch": "main",
+            "allow_users": ["u1"],
+        }
+        import main as plugin_main
+
+        class Stubbed(plugin_main.BlogWriter):
+            async def _upload_images(self, stored, folder=""):
+                self.last_upload_folder = folder
+                return ["https://img.tsh520.cn/file/" + os.path.basename(ref) for ref, _ in stored]
+
+            async def _commit_md(self, path, md, now):
+                self.committed.append((path, md))
+                return True, path, ""
+
+            async def terminate(self):
+                pass
+
+        self.plugin = Stubbed(context=types.SimpleNamespace(), config=dict(self.config))
+        self.plugin.committed = []
+        self.plugin.last_upload_folder = None
+
+    async def _send(self, text):
+        ev = types.SimpleNamespace(
+            message_str=text,
+            get_sender_id=lambda: "u1",
+            get_sender_name=lambda: "用户",
+            get_messages=lambda: [],
+            plain_result=lambda t: types.SimpleNamespace(text=t),
+            message_obj=types.SimpleNamespace(raw_message={}),
+        )
+        out = []
+        async for r in self.plugin.on_message(ev):
+            out.append(r)
+        return [o.text for o in out]
+
+    def _install_net(self, html, image_bytes=b"\xff\xd8\xff fake-jpeg"):
+        class FakeResp:
+            status_code = 200
+
+            def __init__(self, text):
+                self.text = text
+
+        class FakeClient:
+            async def get(self, url, headers=None):
+                return FakeResp(html)
+
+        orig_client = self.plugin._get_client
+        orig_dl = self.plugin._download_http
+        self.plugin._get_client = lambda: FakeClient()
+
+        async def fake_dl(url, referer=""):
+            return image_bytes
+
+        self.plugin._download_http = fake_dl
+        return orig_client, orig_dl
+
+    def _restore(self, orig):
+        self.plugin._get_client, self.plugin._download_http = orig
+
+    def test_full_flow(self):
+        orig = self._install_net(WX_ARTICLE_HTML)
+        try:
+            replies = asyncio.get_event_loop().run_until_complete(
+                self._send("/转载 https://mp.weixin.qq.com/s/abc")
+            )
+            self.assertTrue(any("转载成功" in r for r in replies))
+            self.assertEqual(len(self.plugin.committed), 1)
+            path, md = self.plugin.committed[0]
+            self.assertEqual(path, "src/content/posts/技术分享/测试文章标题.md")
+            self.assertIn("sourceLink: https://mp.weixin.qq.com/s/abc", md)
+            self.assertIn("tags:\n  - 转载", md)
+            self.assertIn("本文转载自微信公众号「测试公众号」", md)
+            self.assertIn("https://img.tsh520.cn/file/article-1.jpg", md)
+            self.assertNotIn("{{IMG_", md)
+            self.assertEqual(self.plugin.last_upload_folder, "blog/article")
+        finally:
+            self._restore(orig)
+
+    def test_verify_page_aborts(self):
+        orig = self._install_net("<html><body>当前环境异常，完成验证后即可继续访问。</body></html>")
+        try:
+            replies = asyncio.get_event_loop().run_until_complete(
+                self._send("/转载 https://mp.weixin.qq.com/s/abc")
+            )
+            self.assertTrue(any("验证" in r for r in replies))
+            self.assertEqual(len(self.plugin.committed), 0)
+        finally:
+            self._restore(orig)
+
+    def test_bad_url_rejected(self):
+        replies = asyncio.get_event_loop().run_until_complete(
+            self._send("/转载 https://example.com/x")
+        )
+        self.assertTrue(any("格式" in r for r in replies))
+        self.assertEqual(len(self.plugin.committed), 0)
+
+    def test_image_download_fail_aborts(self):
+        orig = self._install_net(WX_ARTICLE_HTML, image_bytes=None)
+        try:
+            replies = asyncio.get_event_loop().run_until_complete(
+                self._send("/转载 https://mp.weixin.qq.com/s/abc")
+            )
+            self.assertTrue(any("图片下载失败" in r for r in replies))
+            self.assertEqual(len(self.plugin.committed), 0)
+        finally:
+            self._restore(orig)
+
+
 if __name__ == "__main__":
     unittest.main()

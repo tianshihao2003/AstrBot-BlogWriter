@@ -22,7 +22,7 @@ def now_shanghai() -> datetime:
 SESSION_TIMEOUT = timedelta(minutes=30)
 MAX_PATH_SUFFIX = 10
 
-COMMANDS = ("动态", "笔记", "足迹", "友链", "相册", "账单", "日程", "生日", "纪念日", "影视", "书籍", "导航", "提醒", "发布", "取消", "状态", "帮助")
+COMMANDS = ("动态", "笔记", "足迹", "友链", "相册", "账单", "日程", "生日", "纪念日", "影视", "书籍", "导航", "转载", "提醒", "发布", "取消", "状态", "帮助")
 
 BILL_CATEGORIES = ["餐饮", "交通", "住房", "工资", "居家生活", "交流通讯", "食品酒水", "职业收入", "人情收礼", "还款", "其他"]
 BILL_ACCOUNTS = ["微信", "支付宝", "银行卡", "现金", "其他"]
@@ -750,6 +750,293 @@ def build_daohang_md(
     if color:
         fm["color"] = color
     return _dump_yaml(fm, inline_keys={"tags"}) + "\n\n" + (body or "").strip() + ("\n" if (body or "").strip() else "")
+
+
+# ---------- 微信公众号文章转载 ----------
+
+WX_ARTICLE_HOST = "mp.weixin.qq.com"
+WX_IMG_PLACEHOLDER = "{{IMG_%d}}"
+# 正文里需要排除的非内容图片（二维码/头像等页脚元素）
+_WX_IMG_SKIP_MARKERS = ("qr_code", "qrcode", "jump_author_avatar", "js_pc_weapp_code")
+
+
+def extract_wx_url(text: str) -> Optional[str]:
+    """从消息文本提取微信公众号文章链接；非 mp.weixin.qq.com 的链接返回 None。"""
+    m = re.search(r"https?://mp\.weixin\.qq\.com/[^\s]+", text or "")
+    if not m:
+        return None
+    return m.group(0).rstrip(".,;:!?，。；：！？)）]】>\"'")
+
+
+def _html_unescape(text: str) -> str:
+    import html as _html
+
+    return _html.unescape(text or "")
+
+
+def _strip_tags(fragment: str) -> str:
+    """剥掉剩余标签（含 script/style）并解码实体，压缩空白。"""
+    s = re.sub(r"<script[\s\S]*?</script>", "", fragment or "", flags=re.I)
+    s = re.sub(r"<style[\s\S]*?</style>", "", s, flags=re.I)
+    s = re.sub(r"<[^>]+>", "", s)
+    s = _html_unescape(s)
+    s = re.sub(r"[ \t\u00a0]+", " ", s)
+    return s.strip()
+
+
+def _wx_content_img_src(tag: str) -> str:
+    """从 <img> 标签提取正文图片 URL（data-src 懒加载优先）；页脚二维码/头像返回空串。"""
+    low = (tag or "").lower()
+    if any(marker in low for marker in _WX_IMG_SKIP_MARKERS):
+        return ""
+    src = ""
+    m = re.search(r'data-src=["\']([^"\']+)["\']', tag, flags=re.I)
+    if m:
+        src = m.group(1)
+    else:
+        m = re.search(r'\ssrc=["\']([^"\']+)["\']', tag, flags=re.I)
+        if m:
+            src = m.group(1)
+    src = _html_unescape(src).strip()
+    if not src or src.startswith("data:") or not src.lower().startswith(("http://", "https://")):
+        return ""
+    # mmbiz 图片统一升级 https（博客混合内容安全）
+    if src.startswith("http://mmbiz.qpic.cn"):
+        src = "https://" + src[len("http://"):]
+    return src
+
+
+def _img_tag_to_md(tag: str) -> str:
+    """<img ...> → Markdown 图片（先落 __WXIMG__ 标记，稍后统一换占位符）。"""
+    src = _wx_content_img_src(tag)
+    if not src:
+        return ""
+    return "\n\n[__WXIMG__]({})\n\n".format(src)
+
+
+def html_to_markdown(fragment: str) -> str:
+    """微信正文 HTML 片段 → Markdown。
+
+    实测（2026-09-16）：微信正文段落靠 <section> 分隔（不是 <p>），
+    文字在 <span leaf> 里；因此 </section> 必须作为段落边界，否则整篇挤成一行。
+    另覆盖 img(data-src 优先)/br/h1-h4/blockquote/li/strong/em/a 与实体解码。
+    """
+    if not fragment:
+        return ""
+    s = re.sub(r"<!--[\s\S]*?-->", "", fragment)
+    s = re.sub(r"<script[\s\S]*?</script>", "", s, flags=re.I)
+    s = re.sub(r"<style[\s\S]*?</style>", "", s, flags=re.I)
+    s = re.sub(r"<img[^>]*?>", lambda m: _img_tag_to_md(m.group(0)), s, flags=re.I)
+    s = re.sub(r"<br\s*/?>", "\n", s, flags=re.I)
+    for level in (1, 2, 3, 4):
+        s = re.sub(
+            r"<h%d[^>]*>([\s\S]*?)</h%d>" % (level, level),
+            lambda m, lv=level: "\n\n" + "#" * lv + " " + _strip_tags(m.group(1)) + "\n\n",
+            s,
+            flags=re.I,
+        )
+    s = re.sub(
+        r"<blockquote[^>]*>([\s\S]*?)</blockquote>",
+        lambda m: "\n\n> " + _strip_tags(m.group(1)).replace("\n", "\n> ") + "\n\n",
+        s,
+        flags=re.I,
+    )
+    s = re.sub(
+        r"<li[^>]*>([\s\S]*?)</li>",
+        lambda m: "- " + _strip_tags(m.group(1)) + "\n",
+        s,
+        flags=re.I,
+    )
+    s = re.sub(
+        r"<(?:strong|b)[^>]*>([\s\S]*?)</(?:strong|b)>",
+        lambda m: ("**" + _strip_tags(m.group(1)) + "**") if _strip_tags(m.group(1)) else "",
+        s,
+        flags=re.I,
+    )
+    s = re.sub(
+        r"<(?:em|i)[^>]*>([\s\S]*?)</(?:em|i)>",
+        lambda m: ("*" + _strip_tags(m.group(1)) + "*") if _strip_tags(m.group(1)) else "",
+        s,
+        flags=re.I,
+    )
+    s = re.sub(
+        r"<a[^>]*href=[\"']([^\"']+)[\"'][^>]*>([\s\S]*?)</a>",
+        lambda m: "[{}]({})".format(_strip_tags(m.group(2)) or m.group(1), _html_unescape(m.group(1))),
+        s,
+        flags=re.I,
+    )
+    # 段落边界：</section> 与 <p> 都算（实测微信主体用 section）
+    s = re.sub(r"</section>", "\n\n", s, flags=re.I)
+    s = re.sub(r"<section[^>]*>", "", s, flags=re.I)
+    s = re.sub(r"<p[^>]*>", "\n\n", s, flags=re.I)
+    s = re.sub(r"</p>", "\n\n", s, flags=re.I)
+    s = re.sub(r"<[^>]+>", "", s)
+    s = _html_unescape(s)
+    lines = [re.sub(r"[ \t\u00a0]+", " ", ln).strip() for ln in s.split("\n")]
+    out = "\n".join(lines)
+    out = re.sub(r"\n{3,}", "\n\n", out)
+    return out.strip()
+
+
+def _wx_publish_date(html: str, shanghai_tz) -> str:
+    """解析原文发布日期（YYYY-MM-DD）：优先 publish_time 文本，其次 var ct 时间戳（实测页面用 ct）。"""
+    m = re.search(r'id="publish_time"[^>]*>\s*([^<]+?)\s*<', html or "")
+    if m:
+        t = m.group(1).strip()
+        m2 = re.search(r"(\d{4})\D{1,2}(\d{1,2})\D{1,2}(\d{1,2})", t)
+        if m2:
+            return "{}-{:02d}-{:02d}".format(m2.group(1), int(m2.group(2)), int(m2.group(3)))
+    m3 = re.search(r'var\s+(?:ct|create_time)\s*=\s*"(\d{9,12})"', html or "")
+    if m3:
+        try:
+            ts = int(m3.group(1))
+            return datetime.fromtimestamp(ts, shanghai_tz).strftime("%Y-%m-%d")
+        except (ValueError, OSError, OverflowError):
+            return ""
+    return ""
+
+
+def extract_wx_article(html: str) -> Tuple[Optional[Dict[str, Any]], str]:
+    """解析微信公众号文章页 HTML。
+
+    返回 (data, err)：data = {title, author, publish_date, digest, image_urls, body_md}
+    （body_md 中图片为 {{IMG_i}} 占位符，由 assemble_article_body 替换为图床 URL）。
+    检测微信「环境异常/完成验证」验证页并返回明确错误。
+    """
+    if not html:
+        return None, "抓取内容为空"
+    if ("环境异常" in html) or ("完成验证" in html and "js_content" not in html):
+        return None, "微信要求环境验证（服务器 IP 可能被风控拦截），请稍后重试或更换文章"
+    m = re.search(r'id="js_content"', html)
+    if not m:
+        return None, "未找到文章正文（可能不是图文消息，或页面结构已变化）"
+    # 正文范围：js_content 起，到工具条/推荐区/脚本前的最近边界为止（实测 <script 边界最靠前）
+    tail = html[m.end():]
+    end_idx = len(tail)
+    for marker in ('<div class="rich_media_tool"', 'id="js_sg_bar"', "rich_media_area_extra", "<script"):
+        pos = tail.find(marker)
+        if pos != -1 and pos < end_idx:
+            end_idx = pos
+    content_html = tail[:end_idx]
+    gt = content_html.find(">")
+    if gt != -1:
+        content_html = content_html[gt + 1:]
+    content_html = re.sub(r"</div>\s*$", "", content_html.strip(), count=1)
+
+    # 标题：h1#activity-name → og:title → var msg_title
+    title = ""
+    m_title = re.search(r'id="activity-name"[^>]*>([\s\S]*?)</h1>', html)
+    if m_title:
+        title = _strip_tags(m_title.group(1))
+    if not title:
+        m_og = re.search(r'<meta[^>]+property="og:title"[^>]+content="([^"]+)"', html)
+        if m_og:
+            title = _html_unescape(m_og.group(1)).strip()
+    if not title:
+        m_var = re.search(r'var\s+msg_title\s*=\s*"([^"]+)"', html)
+        if m_var:
+            title = _html_unescape(m_var.group(1)).strip()
+    if not title:
+        return None, "未解析到文章标题"
+
+    # 公众号名：js_name 锚文本 → var nickname
+    author = ""
+    m_auth = re.search(r'id="js_name"[^>]*>([\s\S]*?)</a>', html)
+    if m_auth:
+        author = _strip_tags(m_auth.group(1))
+    if not author:
+        m_var2 = re.search(r'var\s+nickname\s*=\s*(?:htmlDecode\()?"([^"]+)"', html)
+        if m_var2:
+            author = _html_unescape(m_var2.group(1)).strip()
+
+    digest = ""
+    m_desc = re.search(r'<meta[^>]+name="description"[^>]+content="([^"]*)"', html)
+    if m_desc:
+        digest = _html_unescape(m_desc.group(1)).strip()
+
+    image_urls: List[str] = []
+    for m_img in re.finditer(r"<img[^>]*?>", content_html, flags=re.I):
+        src = _wx_content_img_src(m_img.group(0))
+        if src:
+            image_urls.append(src)
+
+    body_md = html_to_markdown(content_html)
+    img_iter = iter(range(len(image_urls)))
+
+    def _ph(_m):
+        return "\n\n{}\n\n".format(WX_IMG_PLACEHOLDER % next(img_iter, 0))
+
+    body_md = re.sub(r"\[__WXIMG__\]\([^)]+\)", _ph, body_md)
+    body_md = re.sub(r"\n{3,}", "\n\n", body_md).strip()
+    text_only = re.sub(r"\{\{IMG_\d+\}\}", "", body_md).strip()
+    if len(text_only) < 10 and not image_urls:
+        return None, "正文内容为空或过短（可能不是可直接转载的图文消息）"
+    if not digest:
+        # 实测：部分文章 description meta 为空 → 用正文首段截取兜底
+        digest = re.sub(r"\s+", " ", text_only)[:60]
+
+    data = {
+        "title": title,
+        "author": author,
+        "publish_date": _wx_publish_date(html, SHANGHAI_TZ),
+        "digest": digest,
+        "image_urls": image_urls,
+        "body_md": body_md,
+    }
+    return data, ""
+
+
+def assemble_article_body(body_md: str, uploaded_urls: List[str]) -> str:
+    """把正文中的 {{IMG_i}} 占位符按序替换为图床 URL；未解析到的占位符直接清除。"""
+    out = body_md or ""
+    for idx, url in enumerate(uploaded_urls or []):
+        out = out.replace(WX_IMG_PLACEHOLDER % idx, url)
+    out = re.sub(r"\{\{IMG_\d+\}\}", "", out)
+    out = re.sub(r"\n{3,}", "\n\n", out)
+    return out.strip()
+
+
+def build_article_md(
+    title: str,
+    body_md: str,
+    image_urls: List[str],
+    tags: List[str],
+    description: str = "",
+    source_link: str = "",
+    author: str = "",
+    publish_date: str = "",
+    now: datetime = None,
+) -> str:
+    """生成转载文章（posts 集合）markdown。
+
+    对齐博客 posts schema（src/content.config.ts）：title/published/tags/description/
+    image/sourceLink；不写已废弃的 category（分类=目录路径）。
+    正文开头自动加转载声明引用块（对齐现有转载文惯例）。
+    """
+    now = now or now_shanghai()
+    fm: Dict[str, Any] = {
+        "title": title,
+        "published": now.strftime("%Y-%m-%d"),
+    }
+    if description:
+        fm["description"] = description
+    if image_urls:
+        fm["image"] = image_urls[0]
+    fm["tags"] = list(tags or [])
+    if source_link:
+        fm["sourceLink"] = source_link
+
+    if author:
+        credit = "> 本文转载自微信公众号「{}」".format(author)
+    else:
+        credit = "> 本文转载自微信公众号文章"
+    if publish_date:
+        credit += "（原文发布于 {}）".format(publish_date)
+    if source_link:
+        credit += "\n> 原文链接：{}".format(source_link)
+
+    body = (body_md or "").strip()
+    return _dump_yaml(fm) + "\n\n" + credit + "\n\n" + body + "\n"
 
 
 # ---------- 友链解析 ----------

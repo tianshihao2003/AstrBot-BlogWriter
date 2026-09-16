@@ -72,6 +72,10 @@ try:
         build_album_md,
         build_amap_url,
         build_bangumi_md,
+        build_article_md,
+        extract_wx_article,
+        extract_wx_url,
+        assemble_article_body,
         build_daohang_md,
         build_tmdb_search_url,
         build_xxapi_ico_url,
@@ -137,6 +141,10 @@ except ImportError:  # 兼容非包形式加载
         build_album_md,
         build_amap_url,
         build_bangumi_md,
+        build_article_md,
+        extract_wx_article,
+        extract_wx_url,
+        assemble_article_body,
         build_daohang_md,
         build_tmdb_search_url,
         build_xxapi_ico_url,
@@ -1132,6 +1140,9 @@ class BlogWriter(Star):
             if cmd == "导航":
                 yield await self._start_daohang(event, user_id, args)
                 return
+            if cmd == "转载":
+                yield await self._handle_article(event, user_id, args)
+                return
             if cmd == "提醒":
                 yield self._handle_remind(event, user_id, args)
                 return
@@ -1582,6 +1593,107 @@ class BlogWriter(Star):
             format_choices("请选择相册：", display, extra=["新建相册"], with_skip_cancel=False)
         )
 
+    _WX_ARTICLE_UA = (
+        "Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 "
+        "(KHTML, like Gecko) Mobile/15E148 MicroMessenger/8.0.44(0x18002c2d) NetType/WIFI Language/zh_CN"
+    )
+
+    @staticmethod
+    def _wx_image_ext(url: str, data: bytes) -> str:
+        """推断微信文章图片扩展名：wx_fmt 参数 → URL 后缀 → 魔数兜底。"""
+        m = re.search(r"[?&]wx_fmt=([a-zA-Z0-9]+)", url or "")
+        fmt = (m.group(1).lower() if m else "")
+        mapping = {"jpeg": "jpg", "jpg": "jpg", "png": "png", "gif": "gif", "webp": "webp", "bmp": "bmp"}
+        if fmt in mapping:
+            return mapping[fmt]
+        base = (url or "").split("?")[0].rsplit(".", 1)
+        if len(base) == 2 and base[1].lower() in mapping:
+            return mapping[base[1].lower()]
+        if data[:3] == b"\xff\xd8\xff":
+            return "jpg"
+        if data[:8].startswith(b"\x89PNG"):
+            return "png"
+        if data[:4] == b"GIF8":
+            return "gif"
+        if data[:4] == b"RIFF":
+            return "webp"
+        return "jpg"
+
+    async def _handle_article(self, event: AstrMessageEvent, user_id: str, args: List[str]):
+        """/转载 公众号文章链接 —— 抓取 → 解析 → 图片转存图床 → 生成 posts 文章 → 提交（直发，不进会话）。
+
+        实测（2026-09-16 本地验证）：直连抓取正常（HTTP 200，无验证页）；
+        微信对部分服务器 IP 会返回「环境异常」验证页 → extract_wx_article 检测后明确报错；
+        图片 mmbiz.qpic.cn 无 Referer 可下载，失败再带 Referer 重试（防盗链兜底）。
+        原子性：标题解析失败 / 任一张图下载或上传失败 → 中止发布，绝不半成品提交。
+        """
+        url = extract_wx_url(" ".join(args).strip())
+        if not url:
+            return event.plain_result("格式：/转载 公众号文章链接（如：/转载 https://mp.weixin.qq.com/s/xxxx）")
+        # 1) 抓取（MicroMessenger UA + Referer）
+        headers = {
+            "User-Agent": self._WX_ARTICLE_UA,
+            "Referer": "https://mp.weixin.qq.com/",
+            "Accept-Language": "zh-CN,zh;q=0.9",
+        }
+        html = ""
+        for attempt in range(RETRY_COUNT + 1):
+            try:
+                resp = await self._get_client().get(url, headers=headers)
+                if resp.status_code >= 400:
+                    return event.plain_result("转载中止：抓取失败 HTTP {}（请确认链接在微信里可正常打开）。".format(resp.status_code))
+                html = resp.text
+                break
+            except Exception as e:
+                logger.warning("BlogWriter: 转载抓取失败(第%d次): %s", attempt + 1, e)
+                if attempt < RETRY_COUNT:
+                    await asyncio.sleep(RETRY_DELAYS[attempt])
+        if not html:
+            return event.plain_result("转载中止：网络错误，请稍后重试。")
+        data, err = extract_wx_article(html)
+        if data is None:
+            return event.plain_result("转载中止：{}。".format(err))
+        # 2) 图片：下载 → 转存图床（任一失败即中止）
+        image_urls: List[str] = []
+        if data["image_urls"]:
+            stored = []
+            for idx, src in enumerate(data["image_urls"]):
+                img = await self._download_http(src)
+                if img is None:
+                    img = await self._download_http(src, referer="https://mp.weixin.qq.com/")
+                if img is None:
+                    return event.plain_result("转载中止：第 {} 张图片下载失败，请稍后重试。".format(idx + 1))
+                stored.append(("article-{}.{}".format(idx + 1, self._wx_image_ext(src, img)), img))
+            result = await self._upload_images(stored, self._cfg("article_upload_folder") or "blog/article")
+            if isinstance(result, str):
+                return event.plain_result("转载中止：图片转存图床失败：{}".format(result))
+            image_urls = result
+        # 3) 生成 md 并提交
+        now = now_shanghai()
+        body_md = assemble_article_body(data["body_md"], image_urls)
+        md = build_article_md(
+            data["title"],
+            body_md,
+            image_urls,
+            self._merge_tags(self._cfg("article_tags", ["转载"]), []),
+            description=data["digest"],
+            source_link=url,
+            author=data["author"],
+            publish_date=data["publish_date"],
+            now=now,
+        )
+        article_dir = clean_filename_part(self._cfg("article_default_dir") or "技术分享", fallback="技术分享")
+        file_name = clean_filename_part(data["title"], fallback="转载文章")
+        path = "src/content/posts/{}/{}.md".format(article_dir, file_name)
+        ok, final_path, err2 = await self._commit_md(path, md, now)
+        if not ok:
+            return event.plain_result("转载提交失败：{}".format(err2))
+        slug = final_path[len("src/content/posts/"):-len(".md")]
+        return event.plain_result(
+            "转载成功 ✅\n\n标题：{}\n公众号：{}\n文件：{}\n博客：https://blog.tsh520.cn/posts/{}".format(
+                data["title"], data["author"] or "未知", final_path, slug)
+        )
+
     # ---------- 发布 ----------
 
     async def _publish(self, event: AstrMessageEvent, user_id: str) -> MessageEventResult:
@@ -2001,10 +2113,11 @@ class BlogWriter(Star):
             logger.warning("BlogWriter 读取本地图片失败: {} ({})".format(ref, e))
             return None
 
-    async def _download_http(self, url: str) -> Optional[bytes]:
+    async def _download_http(self, url: str, referer: str = "") -> Optional[bytes]:
+        headers = {"Referer": referer} if referer else None
         for attempt in range(RETRY_COUNT + 1):
             try:
-                resp = await self._get_client().get(url)
+                resp = await self._get_client().get(url, headers=headers)
                 if resp.status_code >= 400:
                     logger.warning("BlogWriter 下载图片 HTTP {}: {}".format(resp.status_code, url))
                     return None
@@ -2688,6 +2801,8 @@ class BlogWriter(Star):
             "/导航 https://example.com\n"
             "　图标自动获取，随后发键值对：\n"
             "　名称/分类/描述/颜色/#标签\n"
+            "/转载 公众号文章链接\n"
+            "　抓取正文图片转存图床，生成博客文章\n"
             "\n"
             "———— 🔧 管会话 ————\n"
             "/发布　提交当前会话\n"

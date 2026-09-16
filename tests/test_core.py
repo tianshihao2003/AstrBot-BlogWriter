@@ -1012,5 +1012,158 @@ class TestWizard(unittest.TestCase):
         self.assertIn("\t\"name\": \"全新笔记本\"", md)
 
 
+# 微信公众号文章样例（结构对齐 2026-09-16 实测页面：section 分段、span leaf、
+# js_content 容器、脚本边界、页脚二维码/头像需过滤、ct 时间戳、HTML 实体）
+WX_ARTICLE_HTML = """<!DOCTYPE html>
+<html>
+<head>
+<meta property="og:title" content="测试文章标题" />
+<meta name="description" content="这是测试摘要。" />
+</head>
+<body>
+<h1 class="rich_media_title " id="activity-name">
+  <span class="js_title_inner">测试文章标题</span>
+</h1>
+<a id="js_name">测试公众号</a>
+<em id="publish_time" class="rich_media_meta rich_media_meta_text"></em>
+<script>var ct = "1785463020";</script>
+<div class="rich_media_content js_underline_content" id="js_content" style="visibility: hidden;">
+  <section><span leaf="">第一段文字 <strong>加粗</strong> 与 <em>斜体</em>，实体 &amp; &#39;单引号&#39;。</span></section>
+  <section><span leaf="">第二段：<a href="https://example.com/a?b=1">链接文字</a></span></section>
+  <section><img class="rich_pages wxw-img" data-src="https://mmbiz.qpic.cn/mmbiz_jpg/abc/640?wx_fmt=jpeg&amp;from=appmsg" /></section>
+  <section><span leaf="">图片后面一段。<br>换行后的文字。</span></section>
+  <section><img id="js_pc_qr_code_img" class="qr_code_pc_img" /><img class="jump_author_avatar" src="http://mmbiz.qpic.cn/mmbiz_png/xyz/0?wx_fmt=png" /></section>
+  <ul><li>列表项一</li><li>列表项二</li></ul>
+  <blockquote>引用内容</blockquote>
+  <section><span leaf="">最后一段。</span></section>
+  <script>console.log("tail")</script>
+  <div class="rich_media_tool" id="js_tool">工具条不该进正文</div>
+</div>
+</body>
+</html>"""
+
+
+class TestWxArticle(unittest.TestCase):
+    def test_extract_wx_url(self):
+        from blog_writer_core import extract_wx_url
+
+        self.assertEqual(
+            extract_wx_url("/转载 https://mp.weixin.qq.com/s/_0CXcOf250uUhy1304rG3w"),
+            "https://mp.weixin.qq.com/s/_0CXcOf250uUhy1304rG3w",
+        )
+        long_url = "https://mp.weixin.qq.com/s?__biz=MzA1&mid=123&idx=1&sn=abc"
+        self.assertEqual(extract_wx_url("看这个 " + long_url + " 不错"), long_url)
+        # 末尾标点剥离
+        self.assertEqual(extract_wx_url("https://mp.weixin.qq.com/s/abc。"), "https://mp.weixin.qq.com/s/abc")
+        # 非微信域名 / 无链接
+        self.assertIsNone(extract_wx_url("https://example.com/s/abc"))
+        self.assertIsNone(extract_wx_url("没有链接"))
+
+    def test_extract_wx_article_ok(self):
+        from blog_writer_core import WX_IMG_PLACEHOLDER, extract_wx_article
+
+        data, err = extract_wx_article(WX_ARTICLE_HTML)
+        self.assertEqual(err, "")
+        self.assertEqual(data["title"], "测试文章标题")
+        self.assertEqual(data["author"], "测试公众号")
+        # publish_time 元素为空 → 回退 var ct 时间戳（1785463020 → 2026-07-31 上海时区）
+        self.assertEqual(data["publish_date"], "2026-07-31")
+        self.assertEqual(data["digest"], "这是测试摘要。")
+        # 只保留正文图（过滤二维码/头像），且 http mmbiz 升级为 https
+        self.assertEqual(len(data["image_urls"]), 1)
+        self.assertTrue(data["image_urls"][0].startswith("https://mmbiz.qpic.cn/mmbiz_jpg/"))
+        body = data["body_md"]
+        self.assertIn("第一段文字", body)
+        self.assertIn("**加粗**", body)
+        self.assertIn("*斜体*", body)
+        self.assertIn("& '单引号'", body)
+        self.assertIn("[链接文字](https://example.com/a?b=1)", body)
+        self.assertIn("- 列表项一", body)
+        self.assertIn("> 引用内容", body)
+        self.assertIn(WX_IMG_PLACEHOLDER % 0, body)
+        # 页脚内容不进入正文
+        self.assertNotIn("工具条不该进正文", body)
+
+    def test_extract_wx_article_verify_page(self):
+        from blog_writer_core import extract_wx_article
+
+        data, err = extract_wx_article("<html><body>当前环境异常，完成验证后即可继续访问。</body></html>")
+        self.assertIsNone(data)
+        self.assertIn("验证", err)
+
+    def test_extract_wx_article_no_content(self):
+        from blog_writer_core import extract_wx_article
+
+        data, err = extract_wx_article("<html><body><h1 id='x'>标题</h1></body></html>")
+        self.assertIsNone(data)
+        self.assertIn("正文", err)
+
+    def test_extract_wx_article_digest_fallback(self):
+        from blog_writer_core import extract_wx_article
+
+        html = WX_ARTICLE_HTML.replace('<meta name="description" content="这是测试摘要。" />', "")
+        data, err = extract_wx_article(html)
+        self.assertEqual(err, "")
+        self.assertTrue(data["digest"])
+        self.assertIn("第一段文字", data["digest"])
+
+    def test_extract_wx_article_empty_strong_cleaned(self):
+        from blog_writer_core import extract_wx_article
+
+        html = WX_ARTICLE_HTML.replace("第一段文字", "<strong></strong>第一段文字<strong> </strong>")
+        data, err = extract_wx_article(html)
+        self.assertEqual(err, "")
+        self.assertNotIn("****", data["body_md"])
+
+    def test_html_to_markdown_basic(self):
+        from blog_writer_core import html_to_markdown
+
+        md = html_to_markdown("<h2>大标题</h2><p>段落一</p><p>段落<b>粗</b></p><section>分节</section>")
+        self.assertIn("## 大标题", md)
+        self.assertIn("段落一", md)
+        self.assertIn("**粗**", md)
+        self.assertIn("分节", md)
+        # section 作为段落边界：分节与上一段之间必须有换行（不粘连）
+        self.assertNotIn("**粗**分节", md)
+
+    def test_assemble_article_body(self):
+        from blog_writer_core import assemble_article_body
+
+        body = "前文\n\n{{IMG_0}}\n\n中间\n\n{{IMG_1}}\n\n后文\n\n{{IMG_9}}"
+        out = assemble_article_body(body, ["https://img/a.jpg", "https://img/b.jpg"])
+        self.assertIn("https://img/a.jpg", out)
+        self.assertIn("https://img/b.jpg", out)
+        self.assertNotIn("{{IMG_", out)  # 未解析到的占位符清除
+
+    def test_build_article_md(self):
+        from blog_writer_core import build_article_md
+
+        md = build_article_md(
+            "测试文章标题",
+            "正文第一段。",
+            ["https://img.tsh520.cn/file/blog/article/article-1.jpg"],
+            ["转载"],
+            description="这是测试摘要。",
+            source_link="https://mp.weixin.qq.com/s/abc",
+            author="测试公众号",
+            publish_date="2026-07-31",
+            now=datetime(2026, 9, 16),
+        )
+        self.assertIn("title: 测试文章标题", md)
+        self.assertIn("published: 2026-09-16", md)
+        self.assertIn("tags:\n  - 转载", md)
+        self.assertIn("sourceLink: https://mp.weixin.qq.com/s/abc", md)
+        self.assertIn("image: https://img.tsh520.cn/file/blog/article/article-1.jpg", md)
+        self.assertNotIn("category:", md)  # 分类=目录，不写 frontmatter
+        self.assertIn("> 本文转载自微信公众号「测试公众号」（原文发布于 2026-07-31）", md)
+        self.assertIn("> 原文链接：https://mp.weixin.qq.com/s/abc", md)
+        self.assertIn("正文第一段。", md)
+        if yaml:
+            fm = yaml.safe_load(md.split("---")[1])
+            self.assertEqual(fm["title"], "测试文章标题")
+            self.assertEqual(fm["tags"], ["转载"])
+            self.assertEqual(fm["sourceLink"], "https://mp.weixin.qq.com/s/abc")
+
+
 if __name__ == "__main__":
     unittest.main()

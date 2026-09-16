@@ -104,6 +104,21 @@
     "type": "list",
     "default": []
   },
+  "article_default_dir": {
+    "description": "转载文章发布目录（博客分类=文件夹路径，如 技术分享 / 转载）",
+    "type": "string",
+    "default": "技术分享"
+  },
+  "article_upload_folder": {
+    "description": "转载文章图片上传图床目录（转存微信图片用）",
+    "type": "string",
+    "default": "blog/article"
+  },
+  "article_tags": {
+    "description": "转载文章默认标签（/转载 生成的文章会带上）",
+    "type": "list",
+    "default": ["转载"]
+  },
   "bill_default_account": {
     "description": "账单默认账户",
     "type": "string",
