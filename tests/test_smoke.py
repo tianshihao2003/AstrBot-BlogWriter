@@ -1156,7 +1156,8 @@ class TestBillSchedule(unittest.TestCase):
             self.plugin._download_http = orig_download
 
     def test_daohang_full_flow(self):
-        """导航全流程：xxapi 图标（stub）→ 键值对补信息 → 发布到 daohang/（文件名=域名 slug）。"""
+        """导航全流程（2026-09-21 对齐博客）：xxapi 图标（stub）→ 向导选分类文件夹
+        → 键值对补名称/描述 → 发布到 daohang/<分类>/（文件名=域名 slug，四字段无 category）。"""
         import json as _json
 
         class FakeResp:
@@ -1164,47 +1165,102 @@ class TestBillSchedule(unittest.TestCase):
             text = _json.dumps({"code": 200, "data": "https://api.iowen.cn/favicon/x.png"})
 
         class FakeClient:
-            async def get(self, url):
+            async def get(self, url, headers=None):
                 return FakeResp()
 
-        async def fake_download(url):
+        async def fake_download(url, referer=""):
             return b"fake-icon-bytes"
+
+        async def fake_folders(repo, branch, token):
+            return ["学习网站", "工具网站"]
 
         orig_client = self.plugin._get_client
         orig_download = self.plugin._download_http
+        orig_folders = self.plugin._list_daohang_folders
         self.plugin._get_client = lambda: FakeClient()
         self.plugin._download_http = fake_download
+        self.plugin._list_daohang_folders = fake_folders
         try:
             replies = asyncio.get_event_loop().run_until_complete(self._send("/导航 https://app.pagescms.org"))
             self.assertTrue(any("图标已就绪" in r for r in replies))
+            self.assertTrue(any("请选择分类" in r for r in replies))
             sess = self.plugin._sessions.get("u1")
             self.assertEqual(sess.kind, "daohang")
             self.assertEqual(sess.meta.get("name"), "app.pagescms.org")  # 默认名称=域名
             self.assertEqual(len(sess.images), 1)
-            # 键值对补信息（含 #标签）
+            # 向导选分类文件夹（1 = 学习网站）
+            replies = asyncio.get_event_loop().run_until_complete(self._send("1"))
+            self.assertTrue(any("已选分类「学习网站」" in r for r in replies))
+            self.assertEqual(sess.meta.get("category"), "学习网站")
+            self.assertIsNone(sess.wizard)
+            # 键值对补信息（分类为文件夹，不再有颜色/#标签）
             replies = asyncio.get_event_loop().run_until_complete(
-                self._send("名称: PagesCMS\n分类: 我的网站\n描述: 后台管理\n#建站")
+                self._send("名称: PagesCMS\n描述: 后台管理")
             )
             self.assertTrue(any("已记录" in r for r in replies))
             self.assertEqual(sess.meta.get("name"), "PagesCMS")
-            self.assertEqual(sess.meta.get("category"), "我的网站")
-            self.assertEqual(sess.meta.get("tags"), ["建站"])
             # 发布
             replies = asyncio.get_event_loop().run_until_complete(self._send("/发布"))
             self.assertTrue(any("发布成功" in r for r in replies))
             path, md = self.plugin.committed[0]
-            self.assertEqual(path, "src/content/daohang/app-pagescms-org.md")
+            self.assertEqual(path, "src/content/daohang/学习网站/app-pagescms-org.md")
             self.assertIn("name: PagesCMS", md)
             self.assertIn("url: https://app.pagescms.org", md)
-            self.assertIn("category: 我的网站", md)
             self.assertIn("description: 后台管理", md)
-            self.assertIn("tags: [建站]", md)
             self.assertIn("icon: https://img.tsh520.cn/file/app.pagescms.org-icon.png", md)
+            # 四字段格式：不再写 category/tags/color
+            self.assertNotIn("category:", md)
+            self.assertNotIn("tags:", md)
+            self.assertNotIn("color:", md)
             # 图标上传独立目录
             self.assertEqual(self.plugin.last_upload_folder, "blog/daohang")
         finally:
             self.plugin._get_client = orig_client
             self.plugin._download_http = orig_download
+            self.plugin._list_daohang_folders = orig_folders
+
+    def test_daohang_new_category_by_name(self):
+        """导航向导：直接回复分类名 → 命中现有文件夹用原名（忽略空格/大小写），未命中则新建。"""
+        import json as _json
+
+        class FakeResp:
+            status_code = 200
+            text = _json.dumps({"code": 200, "data": "https://api.iowen.cn/favicon/x.png"})
+
+        class FakeClient:
+            async def get(self, url, headers=None):
+                return FakeResp()
+
+        async def fake_download(url, referer=""):
+            return b"fake-icon-bytes"
+
+        async def fake_folders(repo, branch, token):
+            return ["AI 工具", "学习网站"]
+
+        orig_client = self.plugin._get_client
+        orig_download = self.plugin._download_http
+        orig_folders = self.plugin._list_daohang_folders
+        self.plugin._get_client = lambda: FakeClient()
+        self.plugin._download_http = fake_download
+        self.plugin._list_daohang_folders = fake_folders
+        try:
+            # 命中现有文件夹（输入无空格小写形式，应还原为「AI 工具」）
+            asyncio.get_event_loop().run_until_complete(self._send("/导航 https://example.com"))
+            replies = asyncio.get_event_loop().run_until_complete(self._send("ai工具"))
+            sess = self.plugin._sessions.get("u1")
+            self.assertTrue(any("已选分类「AI 工具」" in r for r in replies))
+            self.assertEqual(sess.meta.get("category"), "AI 工具")
+            # 未命中 → 新建分类
+            asyncio.get_event_loop().run_until_complete(self._send("/取消"))
+            asyncio.get_event_loop().run_until_complete(self._send("/导航 https://example2.com"))
+            replies = asyncio.get_event_loop().run_until_complete(self._send("摄影网站"))
+            sess = self.plugin._sessions.get("u1")
+            self.assertTrue(any("已新建分类「摄影网站」" in r for r in replies))
+            self.assertEqual(sess.meta.get("category"), "摄影网站")
+        finally:
+            self.plugin._get_client = orig_client
+            self.plugin._download_http = orig_download
+            self.plugin._list_daohang_folders = orig_folders
 
     def test_start_birthday_single(self):
         replies = asyncio.get_event_loop().run_until_complete(self._send("/生日 我的生日农历8.24"))

@@ -55,6 +55,7 @@
 | tmdb_api_base / tmdb_image_base | TMDB API/图片地址（服务器连不上官方时填自建反代；默认官方地址） |
 | bangumi_upload_folder | 影视封面上传图床目录（独立于动态图片目录），默认 `blog/bangumi` |
 | daohang_upload_folder | 导航网站图标上传图床目录，默认 `blog/daohang` |
+| daohang_default_category | 导航默认分类文件夹（分类列表拉取失败或回复“跳过”时用），默认 `未分类` |
 | article_default_dir | 转载文章发布目录（博客分类=文件夹路径），默认 `技术分享` |
 | article_upload_folder | 转载文章图片转存图床目录，默认 `blog/article` |
 | article_tags | 转载文章默认标签，默认 `["转载"]` |
@@ -89,7 +90,7 @@
 | `/纪念日 结婚纪念日 农历5月20` / `/纪念日` | 纪念日（category: anniversary，每年重复全天），格式 `标题 日期 [@人物]`，日期支持 `1月1日` / `2026-01-01` / `农历5月20` |
 | `/影视 侏罗纪世界` | TMDB 自动搜片取封面（上传图床 `blog/bangumi`）；搜不到转手动模式：发封面图后**向导选类型**（1.电影 2.电视剧 3.动漫 4.纪录片 5.游戏）→ 评分 → 标签；游戏落 `bangumi/game/`、动漫/纪录片写对应 subcategory |
 | `/书籍 认知觉醒` | 书籍记录：自己发封面图（必须），评分/标签/书评同影视，生成 bangumi/book 条目 |
-| `/导航 https://example.com` | 添加导航网站：xxapi 自动取图标（上传图床 `blog/daohang`），随后键值对发 `名称/分类/描述/颜色`、`#标签`，`/发布` 生成 daohang 条目 |
+| `/导航 https://example.com` | 添加导航网站：xxapi 自动取图标（上传图床 `blog/daohang`），**向导选分类文件夹**（列出现有分类，可选新建），随后发键值对 `名称/描述`，`/发布` 生成 `src/content/daohang/<分类>/` 条目（四字段，对齐博客 2026-09-21） |
 | `/转载 https://mp.weixin.qq.com/s/xxxx` | 公众号文章转载：抓取正文转 Markdown、图片转存图床（默认 `blog/article`），生成博客文章（sourceLink + 转载声明）到配置目录（默认 `技术分享`），一次命令直达发布 |
 | `/提醒 列表` / `/提醒 取消 标题` | 查看/取消待提醒日程 |
 | `/发布` | 结束会话：上传图床 → 生成 markdown → GitHub 提交 |
@@ -140,7 +141,7 @@ pip install httpx pycryptodome
 python -m unittest discover -s tests
 ```
 
-187 个单元测试 + 集成冒烟测试（stub astrbot 依赖），覆盖命令解析、markdown 生成（含 YAML 边界与最新格式）、图床/高德/GitHub/TMDB/xxapi 响应解析、友链字段识别、账单支出/收入两类型（含还款记支出与负债下线回归）、向导全流程（笔记/相册/影视类型/账单确认，含选项错位与字段跳过回归）、日程/生日/纪念日解析（含农历与防呆）、影视（TMDB/手动/换封面/game 落盘）与书籍全流程、导航全流程、消息权限与放行逻辑。
+188 个单元测试 + 集成冒烟测试（stub astrbot 依赖），覆盖命令解析、markdown 生成（含 YAML 边界与最新格式）、图床/高德/GitHub/TMDB/xxapi 响应解析、友链字段识别、账单支出/收入两类型（含还款记支出与负债下线回归）、向导全流程（笔记/相册/影视类型/账单确认，含选项错位与字段跳过回归）、日程/生日/纪念日解析（含农历与防呆）、影视（TMDB/手动/换封面/game 落盘）与书籍全流程、导航全流程、消息权限与放行逻辑。
 
 ## 致谢
 

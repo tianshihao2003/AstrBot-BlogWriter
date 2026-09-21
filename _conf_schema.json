@@ -69,6 +69,11 @@
     "type": "string",
     "default": "blog/daohang"
   },
+  "daohang_default_category": {
+    "description": "导航默认分类文件夹（分类列表拉取失败或回复“跳过”时使用；博客分类=文件夹，如 未分类/学习网站）",
+    "type": "string",
+    "default": "未分类"
+  },
   "moment_tags": {
     "description": "动态默认标签",
     "type": "list",

@@ -929,37 +929,41 @@ class TestDaohang(unittest.TestCase):
     def test_parse_daohang_text(self):
         from blog_writer_core import parse_daohang_text
 
-        kv = parse_daohang_text("名称: 团子的邮箱\n分类：我的网站\n描述: 邮箱服务\n颜色: #3b82f6")
+        kv = parse_daohang_text("名称: 团子的邮箱\n分类：学习网站\n描述: 邮箱服务")
         self.assertEqual(kv.get("name"), "团子的邮箱")
-        self.assertEqual(kv.get("category"), "我的网站")
+        self.assertEqual(kv.get("category"), "学习网站")  # 分类现为文件夹名
         self.assertEqual(kv.get("description"), "邮箱服务")
-        self.assertEqual(kv.get("color"), "#3b82f6")
+        # color 已随博客导航精简删除，不再解析
+        self.assertNotIn("color", parse_daohang_text("颜色: #3b82f6"))
         # 无键值对内容
         self.assertEqual(parse_daohang_text("随便一句话"), {})
 
     def test_build_daohang_md(self):
         from blog_writer_core import build_daohang_md
 
+        # 对齐博客 2026-09-21（v1.40.3）：条目只有 name/url/icon/description 四字段
         md = build_daohang_md(
-            "团子的邮箱", "https://email.0824.uk/inbox", "我的网站",
+            "团子的邮箱",
+            "https://email.0824.uk/inbox",
             "https://img.tsh520.cn/file/blog/daohang/x-icon.webp",
-            "个人使用的邮箱服务", ["个人网站", "实用工具"], "#3b82f6", body="正文",
+            "个人使用的邮箱服务",
+            body="正文",
         )
-        # 对齐现有 src/content/daohang/01-tuanzi-email.md 格式
         self.assertIn("name: 团子的邮箱", md)
         self.assertIn("url: https://email.0824.uk/inbox", md)
         self.assertIn("icon: https://img.tsh520.cn/file/blog/daohang/x-icon.webp", md)
         self.assertIn("description: 个人使用的邮箱服务", md)
-        self.assertIn("category: 我的网站", md)
-        self.assertIn("tags: [个人网站, 实用工具]", md)
-        self.assertIn('color: "#3b82f6"', md)
         self.assertIn("正文", md)
-        # 无图标/描述/标签/颜色时不写字段
-        md2 = build_daohang_md("X", "https://x.com", "")
+        # 已删除字段一律不写（category 由文件夹决定；tags/color/featured/order/image 已从 schema 移除）
+        self.assertNotIn("category:", md)
+        self.assertNotIn("tags:", md)
+        self.assertNotIn("color:", md)
+        self.assertNotIn("featured:", md)
+        self.assertNotIn("order:", md)
+        # 无图标/描述时不写字段
+        md2 = build_daohang_md("X", "https://x.com")
         self.assertNotIn("icon:", md2)
         self.assertNotIn("description:", md2)
-        self.assertNotIn("tags:", md2)
-        self.assertNotIn("color:", md2)
 
 
 class TestWizard(unittest.TestCase):

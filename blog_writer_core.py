@@ -699,14 +699,14 @@ def daohang_slug(url: str) -> str:
 def parse_daohang_text(text: str) -> Dict[str, str]:
     """解析导航键值对文本（会话内逐行/多行发送）。
 
-    别名：名称/名字/网站名/name/title→name；分类/类别/category→category；
-    描述/简介/介绍/description/desc→description；颜色/色彩/color→color。
+    别名：名称/名字/网站名/name/title→name；分类/类别/category→category（现为「文件夹名」）；
+    描述/简介/介绍/description/desc→description。
+    注：2026-09-21 博客导航精简为四字段（name/url/icon/description），color/tags 已删除不再解析。
     """
     aliases = {
         "name": ["名称", "名字", "网站名称", "网站名", "站点名称", "站点名", "标题", "name", "title"],
         "category": ["分类", "类别", "类目", "category"],
         "description": ["描述", "简介", "介绍", "描述信息", "description", "desc", "descr"],
-        "color": ["颜色", "色彩", "色值", "color"],
     }
     result: Dict[str, str] = {}
     for raw_line in (text or "").splitlines():
@@ -729,27 +729,20 @@ def parse_daohang_text(text: str) -> Dict[str, str]:
 def build_daohang_md(
     name: str,
     url: str,
-    category: str,
     icon_url: str = "",
     description: str = "",
-    tags: Optional[List[str]] = None,
-    color: str = "",
     body: str = "",
 ) -> str:
-    """生成导航条目 md，对齐现有 src/content/daohang/ 文件格式：
-    name/url/icon/description/category/tags(行内无引号)/color(带引号)。featured/order 用户不指定不写。
+    """生成导航条目 md，对齐博客最新格式（2026-09-21 v1.40.3）：
+    条目只有 name/url/icon/description 四个字段（category 由文件夹决定，
+    tags/color/featured/order/image 已从 schema 删除，不再写入）。
     """
     fm: Dict[str, Any] = {"name": name, "url": url}
     if icon_url:
         fm["icon"] = icon_url
     if description:
         fm["description"] = description
-    fm["category"] = category or "未分类"
-    if tags:
-        fm["tags"] = list(tags)
-    if color:
-        fm["color"] = color
-    return _dump_yaml(fm, inline_keys={"tags"}) + "\n\n" + (body or "").strip() + ("\n" if (body or "").strip() else "")
+    return _dump_yaml(fm) + "\n\n" + (body or "").strip() + ("\n" if (body or "").strip() else "")
 
 
 # ---------- 微信公众号文章转载 ----------

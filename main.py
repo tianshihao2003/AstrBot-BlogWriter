@@ -249,6 +249,8 @@ class BlogWriter(Star):
                 self._scheduler = None
         else:
             logger.warning("BlogWriter: 未安装 apscheduler，提醒功能将仅内存生效（重启丢失）")
+            # 无调度器时仍把持久化提醒恢复到内存列表（否则 /提醒 列表 在重启后为空）
+            self._restore_reminders()
 
     def _resolve_reminder_file(self) -> Path:
         """提醒持久化路径。官方规范（docs.astrbot.app/dev/star）：持久化数据应存
@@ -855,8 +857,39 @@ class BlogWriter(Star):
         when = "农历{}月{}".format(parsed.get("lunarMonth"), parsed.get("lunarDay")) if parsed.get("isLunar") else parsed.get("date").strftime("%Y-%m-%d")
         return event.plain_result("已识别纪念日：{}（{}，每年重复）。发 /发布 提交，发 /取消 放弃。".format(parsed.get("title"), when))
 
+    async def _list_daohang_folders(self, repo: str, branch: str, token: str) -> Optional[List[str]]:
+        """列出 src/content/daohang 下的一级分类文件夹名。
+
+        返回排序后的文件夹名列表；请求失败返回 None（区别于空目录的 []）。
+        """
+        url = "https://api.github.com/repos/{}/contents/src/content/daohang?ref={}".format(
+            repo, urllib.parse.quote(branch)
+        )
+        headers = {
+            "Authorization": "Bearer " + token,
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+        }
+        try:
+            resp = await self._get_client().get(url, headers=headers)
+            if resp.status_code != 200:
+                return None
+            import json as _json
+            items = _json.loads(resp.text)
+            names = []
+            for it in items:
+                if isinstance(it, dict) and it.get("type") == "dir":
+                    n = str(it.get("name") or "").strip()
+                    if n and not n.startswith("."):
+                        names.append(n)
+            return sorted(names)
+        except Exception as e:
+            logger.warning("BlogWriter: 列导航分类失败: %s", e)
+            return None
+
     async def _start_daohang(self, event: AstrMessageEvent, user_id: str, args: List[str]):
-        """/导航 网址 —— xxapi 取网站图标（字节入会话，/发布 传图床 blog/daohang），键值对补名称/分类/描述。"""
+        """/导航 网址 —— xxapi 取网站图标，向导选分类文件夹（2026-09-21 起分类=文件夹），
+        键值对补名称/描述；/发布 上传图标到 blog/daohang 并提交 src/content/daohang/<分类>/。"""
         url = " ".join(args).strip()
         if not url:
             return event.plain_result("格式：/导航 网址（如：/导航 https://example.com），图标自动获取。")
@@ -878,29 +911,39 @@ class BlogWriter(Star):
         session = Session("daohang", {
             "url": url,
             "name": host,  # 默认名称=域名，可键值对改
-            "category": "未分类",
+            "category": "",  # 分类文件夹，待向导选择
             "description": "",
-            "color": "",
-            "tags": [],
         })
         if icon_bytes:
             ext = (icon_url.rsplit(".", 1)[-1].split("?")[0].lower() or "png")
             if ext not in ("jpg", "jpeg", "png", "webp", "gif", "ico", "svg", "bmp"):
                 ext = "png"
-            session.add_image("{}-icon.{}".format(host, ext), icon_bytes)  # 对齐现有图床命名 blog.tsh520.cn-icon.webp
+            session.add_image("{}-icon.{}".format(host, ext), icon_bytes)  # 对齐现有图床命名 blog.tsh520.com-icon.webp
             icon_hint = "图标已就绪"
         else:
             icon_hint = "⚠ 图标获取失败（将无图标发布，不影响其他字段）"
         self._sessions[user_id] = session
+        # 向导：选分类文件夹（博客导航分类=文件夹，如 学习网站/AI 工具/未分类）
+        repo = self._cfg("github_repo") or "tianshihao2003/dumplingandcakeblog"
+        branch = self._cfg("github_branch") or "main"
+        token = (self._cfg("github_token") or "").strip()
+        folders = await self._list_daohang_folders(repo, branch, token)
+        if not folders:
+            # 列表拉取失败/为空：用配置默认分类，直接进入键值对
+            session.meta["category"] = clean_filename_part(
+                self._cfg("daohang_default_category", "未分类") or "未分类", fallback="未分类"
+            )
+            return event.plain_result(
+                "{}：{}\n\n"
+                "分类：{}（未能读取分类列表，可在配置 daohang_default_category 调整）\n"
+                "可继续发（键值对，可多行）：名称: xxx / 描述: xxx\n"
+                "发 /发布 提交，/取消 放弃。".format(icon_hint, host, session.meta["category"])
+            )
+        session.wizard = {"step": "daohang_pick_category", "folders": folders}
         return event.plain_result(
-            "{}：{}\n\n"
-            "可继续发（键值对，可多行）：\n"
-            "名称: 自定义名称\n"
-            "分类: 我的网站\n"
-            "描述: 一句话介绍\n"
-            "颜色: #3b82f6\n"
-            "#标签\n"
-            "发 /发布 提交，/取消 放弃。".format(icon_hint, host)
+            "{}：{}\n\n".format(icon_hint, host)
+            + format_choices("请选择分类（文件夹）：", folders, extra=["新建分类"], with_skip_cancel=False)
+            + "\n也可直接回复分类名（如：学习网站）"
         )
 
     def _start_book(self, event: AstrMessageEvent, user_id: str, args: List[str]):
@@ -1350,25 +1393,23 @@ class BlogWriter(Star):
                         else:
                             yield event.plain_result("账单解析失败：{}，请重发。".format(err))
                     elif session.kind == "daohang":
-                        # 导航会话：键值对（名称/分类/描述/颜色）+ #标签
+                        # 导航会话：键值对（名称/描述；分类=文件夹，发「分类: xxx」可改）
                         kv = parse_daohang_text(text)
-                        clean, tags = extract_tags(text)
                         if kv:
                             for k, v in kv.items():
+                                if k == "category":
+                                    # 分类改为文件夹名：清洗后写入（对齐博客 2026-09-21 文件夹分类）
+                                    v = clean_filename_part(v, fallback="")
+                                    if not v:
+                                        continue
                                 session.meta[k] = v
-                        if tags:
-                            existing = session.meta.setdefault("tags", [])
-                            for t in tags:
-                                if t not in existing:
-                                    existing.append(t)
                         session.touch()
                         summary = "，".join(
                             "{}：{}".format(label, str(session.meta.get(key))[:30])
-                            for key, label in (("name", "名称"), ("category", "分类"), ("description", "描述"), ("color", "颜色"))
+                            for key, label in (("name", "名称"), ("category", "分类"), ("description", "描述"))
                             if session.meta.get(key)
                         )
-                        tag_hint = "，标签：{}".format(" ".join("#" + t for t in session.meta.get("tags", []))) if session.meta.get("tags") else ""
-                        yield event.plain_result("已记录：{}{}。发 /发布 提交，发 /取消 放弃。".format(summary, tag_hint))
+                        yield event.plain_result("已记录：{}。发 /发布 提交，发 /取消 放弃。".format(summary))
                         return
                     elif session.kind in ("media", "book"):
                         # 影视/书籍会话：键值对（名称/类型）→ 评分行 → #标签 → 其余为正文
@@ -1823,20 +1864,23 @@ class BlogWriter(Star):
                 path = "src/content/album/{}.md".format(clean_name)
                 link = "/album/{}".format(clean_name)
             elif session.kind == "daohang":
-                # 导航条目：图标已在上方上传（无图标时 image 留空，schema optional）
+                # 导航条目（2026-09-21 对齐博客）：分类=文件夹，条目只有 name/url/icon/description 四字段
                 icon_url = image_urls[0] if image_urls else ""
+                daohang_cat = clean_filename_part(
+                    session.meta.get("category") or self._cfg("daohang_default_category", "未分类") or "未分类",
+                    fallback="未分类",
+                )
                 md = build_daohang_md(
                     session.meta.get("name", ""),
                     session.meta.get("url", ""),
-                    session.meta.get("category", "未分类"),
                     icon_url,
                     session.meta.get("description", ""),
-                    session.meta.get("tags") or [],
-                    session.meta.get("color", ""),
                     body=session.full_text(),
                 )
-                path = "src/content/daohang/{}.md".format(daohang_slug(session.meta.get("url", "")))
-                link = "/daohang"
+                path = "src/content/daohang/{}/{}.md".format(
+                    daohang_cat, daohang_slug(session.meta.get("url", ""))
+                )
+                link = "/projects"
             elif session.kind == "book":
                 # 书籍条目：封面用户上传（必须），标准 bangumi 格式 category: book，放 book/ 根目录
                 if not image_urls:
@@ -2764,6 +2808,61 @@ class BlogWriter(Star):
             sess.touch()
             return event.plain_result(self._bill_confirm_text(sess))
 
+        # ---- 导航向导（分类=文件夹，2026-09-21 对齐博客） ----
+        if step == "daohang_pick_category":
+            folders = sess.wizard.get("folders", [])
+            total = len(folders) + 1  # 含新建
+            choice = parse_choice(text, total)
+            if choice is not None:
+                if choice == total:  # 新建分类
+                    sess.wizard = {"step": "daohang_input_new_category", "folders": folders}
+                    return event.plain_result("请输入新分类名（将作为文件夹名，如：摄影网站）：")
+                picked = folders[choice - 1]
+                sess.meta["category"] = picked
+                sess.wizard = None
+                sess.touch()
+                return event.plain_result(
+                    "已选分类「{}」。\n可继续发键值对：名称: xxx / 描述: xxx\n发 /发布 提交，/取消 放弃。".format(picked)
+                )
+            if is_wizard_skip(text):
+                default_cat = clean_filename_part(
+                    self._cfg("daohang_default_category", "未分类") or "未分类", fallback="未分类"
+                )
+                sess.meta["category"] = default_cat
+                sess.wizard = None
+                sess.touch()
+                return event.plain_result(
+                    "已用默认分类「{}」。\n可继续发键值对：名称: xxx / 描述: xxx\n发 /发布 提交，/取消 放弃。".format(default_cat)
+                )
+            if text and len(text) <= 20:
+                # 直接回复分类名：命中现有文件夹（忽略大小写/空格差异）则用原名，否则作为新分类
+                norm = re.sub(r"\s+", "", text).lower()
+                matched = next((f for f in folders if re.sub(r"\s+", "", f).lower() == norm), "")
+                picked = matched or clean_filename_part(text, fallback="")
+                if picked:
+                    sess.meta["category"] = picked
+                    sess.wizard = None
+                    sess.touch()
+                    hint = "已选分类「{}」".format(picked) if matched else "已新建分类「{}」".format(picked)
+                    return event.plain_result(
+                        "{hint}。\n可继续发键值对：名称: xxx / 描述: xxx\n发 /发布 提交，/取消 放弃。".format(hint=hint)
+                    )
+            return event.plain_result(
+                "请回复数字选择分类，或直接发分类名：\n"
+                + format_choices("请选择分类（文件夹）：", folders, extra=["新建分类"], with_skip_cancel=False)
+            )
+
+        if step == "daohang_input_new_category":
+            chk = clean_filename_part(text, fallback="")
+            if not chk:
+                return event.plain_result("分类名无效，请重发（1-20 字，避免特殊符号）：")
+            sess.meta["category"] = chk
+            sess.wizard = None
+            sess.touch()
+            return event.plain_result(
+                "已新建分类「{}」。\n可继续发键值对：名称: xxx / 描述: xxx\n发 /发布 提交，/取消 放弃。".format(chk)
+            )
+
         return None
 
     # ---------- 其他 ----------
@@ -2799,8 +2898,8 @@ class BlogWriter(Star):
             "/书籍 认知觉醒\n"
             "　封面自己发一张，评分/标签/书评\n"
             "/导航 https://example.com\n"
-            "　图标自动获取，随后发键值对：\n"
-            "　名称/分类/描述/颜色/#标签\n"
+            "　图标自动获取，向导选分类（文件夹），\n"
+            "　随后发键值对：名称/描述\n"
             "/转载 公众号文章链接\n"
             "　抓取正文图片转存图床，生成博客文章\n"
             "\n"
