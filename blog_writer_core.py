@@ -701,7 +701,8 @@ def parse_daohang_text(text: str) -> Dict[str, str]:
 
     别名：名称/名字/网站名/name/title→name；分类/类别/category→category（现为「文件夹名」）；
     描述/简介/介绍/description/desc→description。
-    注：2026-09-21 博客导航精简为四字段（name/url/icon/description），color/tags 已删除不再解析。
+    注：2026-09-21 博客导航精简为四字段（name/url/icon/description），color 已删除不再解析；
+    同日 tags 又回归为可选字段，标签改走 #标签 收集，不经本函数。
     """
     aliases = {
         "name": ["名称", "名字", "网站名称", "网站名", "站点名称", "站点名", "标题", "name", "title"],
@@ -732,16 +733,23 @@ def build_daohang_md(
     icon_url: str = "",
     description: str = "",
     body: str = "",
+    tags: Optional[List[str]] = None,
 ) -> str:
-    """生成导航条目 md，对齐博客最新格式（2026-09-21 v1.40.3）：
-    条目只有 name/url/icon/description 四个字段（category 由文件夹决定，
-    tags/color/featured/order/image 已从 schema 删除，不再写入）。
+    """生成导航条目 md，对齐博客最新格式（2026-09-21 v1.40.3 + tags 回归）：
+    条目写 name/url + 可选 icon/description/tags（category 由文件夹决定，
+    color/featured/order/image 已从 schema 删除，不再写入）。
+    tags 非空时按块状列表输出（与 src/content/daohang 下现有条目一致）：
+        tags:
+          - API
     """
     fm: Dict[str, Any] = {"name": name, "url": url}
     if icon_url:
         fm["icon"] = icon_url
     if description:
         fm["description"] = description
+    clean_tags = [str(t).strip() for t in (tags or []) if str(t).strip()]
+    if clean_tags:
+        fm["tags"] = clean_tags
     return _dump_yaml(fm) + "\n\n" + (body or "").strip() + ("\n" if (body or "").strip() else "")
 
 

@@ -889,7 +889,7 @@ class BlogWriter(Star):
 
     async def _start_daohang(self, event: AstrMessageEvent, user_id: str, args: List[str]):
         """/导航 网址 —— xxapi 取网站图标，向导选分类文件夹（2026-09-21 起分类=文件夹），
-        键值对补名称/描述；/发布 上传图标到 blog/daohang 并提交 src/content/daohang/<分类>/。"""
+        键值对补名称/描述、#标签 补标签；/发布 上传图标到 blog/daohang 并提交 src/content/daohang/<分类>/。"""
         url = " ".join(args).strip()
         if not url:
             return event.plain_result("格式：/导航 网址（如：/导航 https://example.com），图标自动获取。")
@@ -936,7 +936,7 @@ class BlogWriter(Star):
             return event.plain_result(
                 "{}：{}\n\n"
                 "分类：{}（未能读取分类列表，可在配置 daohang_default_category 调整）\n"
-                "可继续发（键值对，可多行）：名称: xxx / 描述: xxx\n"
+                "可继续发（键值对，可多行）：名称: xxx / 描述: xxx / #标签\n"
                 "发 /发布 提交，/取消 放弃。".format(icon_hint, host, session.meta["category"])
             )
         session.wizard = {"step": "daohang_pick_category", "folders": folders}
@@ -1393,8 +1393,10 @@ class BlogWriter(Star):
                         else:
                             yield event.plain_result("账单解析失败：{}，请重发。".format(err))
                     elif session.kind == "daohang":
-                        # 导航会话：键值对（名称/描述；分类=文件夹，发「分类: xxx」可改）
-                        kv = parse_daohang_text(text)
+                        # 导航会话：键值对（名称/描述；分类=文件夹，发「分类: xxx」可改），#标签 追加标签
+                        # 先摘 #标签 再解析键值对，避免标签粘在描述里（tags 2026-09-21 起回归为可选字段）
+                        kv_text, tags = extract_tags(text)
+                        kv = parse_daohang_text(kv_text)
                         if kv:
                             for k, v in kv.items():
                                 if k == "category":
@@ -1403,13 +1405,25 @@ class BlogWriter(Star):
                                     if not v:
                                         continue
                                 session.meta[k] = v
+                        if tags:
+                            existing = session.meta.setdefault("tags", [])
+                            for t in tags:
+                                if t not in existing:
+                                    existing.append(t)
                         session.touch()
                         summary = "，".join(
                             "{}：{}".format(label, str(session.meta.get(key))[:30])
                             for key, label in (("name", "名称"), ("category", "分类"), ("description", "描述"))
                             if session.meta.get(key)
                         )
-                        yield event.plain_result("已记录：{}。发 /发布 提交，发 /取消 放弃。".format(summary))
+                        tag_hint = (
+                            "，标签：{}".format(" ".join("#" + t for t in session.meta.get("tags", [])))
+                            if session.meta.get("tags")
+                            else ""
+                        )
+                        yield event.plain_result(
+                            "已记录：{}{}。发 /发布 提交，发 /取消 放弃。".format(summary, tag_hint)
+                        )
                         return
                     elif session.kind in ("media", "book"):
                         # 影视/书籍会话：键值对（名称/类型）→ 评分行 → #标签 → 其余为正文
@@ -1864,7 +1878,8 @@ class BlogWriter(Star):
                 path = "src/content/album/{}.md".format(clean_name)
                 link = "/album/{}".format(clean_name)
             elif session.kind == "daohang":
-                # 导航条目（2026-09-21 对齐博客）：分类=文件夹，条目只有 name/url/icon/description 四字段
+                # 导航条目（2026-09-21 对齐博客）：分类=文件夹，
+                # 条目写 name/url/icon/description + 可选 tags（color/image/featured/order 已从 schema 删除）
                 icon_url = image_urls[0] if image_urls else ""
                 daohang_cat = clean_filename_part(
                     session.meta.get("category") or self._cfg("daohang_default_category", "未分类") or "未分类",
@@ -1876,6 +1891,7 @@ class BlogWriter(Star):
                     icon_url,
                     session.meta.get("description", ""),
                     body=session.full_text(),
+                    tags=session.meta.get("tags") or [],
                 )
                 path = "src/content/daohang/{}/{}.md".format(
                     daohang_cat, daohang_slug(session.meta.get("url", ""))
@@ -2822,7 +2838,7 @@ class BlogWriter(Star):
                 sess.wizard = None
                 sess.touch()
                 return event.plain_result(
-                    "已选分类「{}」。\n可继续发键值对：名称: xxx / 描述: xxx\n发 /发布 提交，/取消 放弃。".format(picked)
+                    "已选分类「{}」。\n可继续发键值对：名称: xxx / 描述: xxx，可加 #标签\n发 /发布 提交，/取消 放弃。".format(picked)
                 )
             if is_wizard_skip(text):
                 default_cat = clean_filename_part(
@@ -2832,7 +2848,7 @@ class BlogWriter(Star):
                 sess.wizard = None
                 sess.touch()
                 return event.plain_result(
-                    "已用默认分类「{}」。\n可继续发键值对：名称: xxx / 描述: xxx\n发 /发布 提交，/取消 放弃。".format(default_cat)
+                    "已用默认分类「{}」。\n可继续发键值对：名称: xxx / 描述: xxx，可加 #标签\n发 /发布 提交，/取消 放弃。".format(default_cat)
                 )
             if text and len(text) <= 20:
                 # 直接回复分类名：命中现有文件夹（忽略大小写/空格差异）则用原名，否则作为新分类
@@ -2845,7 +2861,7 @@ class BlogWriter(Star):
                     sess.touch()
                     hint = "已选分类「{}」".format(picked) if matched else "已新建分类「{}」".format(picked)
                     return event.plain_result(
-                        "{hint}。\n可继续发键值对：名称: xxx / 描述: xxx\n发 /发布 提交，/取消 放弃。".format(hint=hint)
+                        "{hint}。\n可继续发键值对：名称: xxx / 描述: xxx，可加 #标签\n发 /发布 提交，/取消 放弃。".format(hint=hint)
                     )
             return event.plain_result(
                 "请回复数字选择分类，或直接发分类名：\n"
@@ -2860,7 +2876,7 @@ class BlogWriter(Star):
             sess.wizard = None
             sess.touch()
             return event.plain_result(
-                "已新建分类「{}」。\n可继续发键值对：名称: xxx / 描述: xxx\n发 /发布 提交，/取消 放弃。".format(chk)
+                "已新建分类「{}」。\n可继续发键值对：名称: xxx / 描述: xxx，可加 #标签\n发 /发布 提交，/取消 放弃。".format(chk)
             )
 
         return None
@@ -2899,7 +2915,7 @@ class BlogWriter(Star):
             "　封面自己发一张，评分/标签/书评\n"
             "/导航 https://example.com\n"
             "　图标自动获取，向导选分类（文件夹），\n"
-            "　随后发键值对：名称/描述\n"
+            "　随后发键值对：名称/描述，可加 #标签\n"
             "/转载 公众号文章链接\n"
             "　抓取正文图片转存图床，生成博客文章\n"
             "\n"

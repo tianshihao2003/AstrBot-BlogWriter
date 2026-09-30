@@ -1157,7 +1157,7 @@ class TestBillSchedule(unittest.TestCase):
 
     def test_daohang_full_flow(self):
         """导航全流程（2026-09-21 对齐博客）：xxapi 图标（stub）→ 向导选分类文件夹
-        → 键值对补名称/描述 → 发布到 daohang/<分类>/（文件名=域名 slug，四字段无 category）。"""
+        → 键值对补名称/描述 + #标签 → 发布到 daohang/<分类>/（文件名=域名 slug，无 category）。"""
         import json as _json
 
         class FakeResp:
@@ -1193,12 +1193,15 @@ class TestBillSchedule(unittest.TestCase):
             self.assertTrue(any("已选分类「学习网站」" in r for r in replies))
             self.assertEqual(sess.meta.get("category"), "学习网站")
             self.assertIsNone(sess.wizard)
-            # 键值对补信息（分类为文件夹，不再有颜色/#标签）
+            # 键值对补信息（分类为文件夹）+ #标签（2026-09-21 起 tags 回归，可选）
             replies = asyncio.get_event_loop().run_until_complete(
-                self._send("名称: PagesCMS\n描述: 后台管理")
+                self._send("名称: PagesCMS\n描述: 后台管理 #工具 #建站")
             )
             self.assertTrue(any("已记录" in r for r in replies))
             self.assertEqual(sess.meta.get("name"), "PagesCMS")
+            # #标签 从描述里摘走，不粘在描述上
+            self.assertEqual(sess.meta.get("description"), "后台管理")
+            self.assertEqual(sess.meta.get("tags"), ["工具", "建站"])
             # 发布
             replies = asyncio.get_event_loop().run_until_complete(self._send("/发布"))
             self.assertTrue(any("发布成功" in r for r in replies))
@@ -1208,9 +1211,9 @@ class TestBillSchedule(unittest.TestCase):
             self.assertIn("url: https://app.pagescms.org", md)
             self.assertIn("description: 后台管理", md)
             self.assertIn("icon: https://img.tsh520.cn/file/app.pagescms.org-icon.png", md)
-            # 四字段格式：不再写 category/tags/color
+            self.assertIn("tags:\n  - 工具\n  - 建站", md)
+            # category 由文件夹决定，不再写进 frontmatter
             self.assertNotIn("category:", md)
-            self.assertNotIn("tags:", md)
             self.assertNotIn("color:", md)
             # 图标上传独立目录
             self.assertEqual(self.plugin.last_upload_folder, "blog/daohang")

@@ -941,7 +941,7 @@ class TestDaohang(unittest.TestCase):
     def test_build_daohang_md(self):
         from blog_writer_core import build_daohang_md
 
-        # 对齐博客 2026-09-21（v1.40.3）：条目只有 name/url/icon/description 四字段
+        # 对齐博客 2026-09-21（v1.40.3 + tags 回归）：条目写 name/url + 可选 icon/description/tags
         md = build_daohang_md(
             "团子的邮箱",
             "https://email.0824.uk/inbox",
@@ -954,9 +954,8 @@ class TestDaohang(unittest.TestCase):
         self.assertIn("icon: https://img.tsh520.cn/file/blog/daohang/x-icon.webp", md)
         self.assertIn("description: 个人使用的邮箱服务", md)
         self.assertIn("正文", md)
-        # 已删除字段一律不写（category 由文件夹决定；tags/color/featured/order/image 已从 schema 移除）
+        # 已删除字段一律不写（category 由文件夹决定；color/featured/order/image 已从 schema 移除）
         self.assertNotIn("category:", md)
-        self.assertNotIn("tags:", md)
         self.assertNotIn("color:", md)
         self.assertNotIn("featured:", md)
         self.assertNotIn("order:", md)
@@ -964,6 +963,22 @@ class TestDaohang(unittest.TestCase):
         md2 = build_daohang_md("X", "https://x.com")
         self.assertNotIn("icon:", md2)
         self.assertNotIn("description:", md2)
+
+    def test_build_daohang_md_tags(self):
+        from blog_writer_core import build_daohang_md
+
+        # tags 2026-09-21 起回归为可选字段，块状列表（与 src/content/daohang 下现有条目一致）
+        md = build_daohang_md(
+            "站点X",
+            "https://x.cn",
+            tags=["API", "对话"],
+        )
+        self.assertIn("tags:\n  - API\n  - 对话", md)
+        # 空/空白 tags 不写 tags 行
+        self.assertNotIn("tags:", build_daohang_md("X", "https://x.com", tags=[]))
+        self.assertNotIn("tags:", build_daohang_md("X", "https://x.com", tags=["  ", ""]))
+        # 单项也可
+        self.assertIn("tags:\n  - 工具", build_daohang_md("X", "https://x.com", tags=["工具"]))
 
 
 class TestWizard(unittest.TestCase):

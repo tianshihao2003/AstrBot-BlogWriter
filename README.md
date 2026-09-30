@@ -26,7 +26,7 @@
 - ✅ 文件名自动冲突处理：同日多条自动追加 `-1`、`-2` 后缀
 - ✅ **影视记录**（2026-08-23）：`/影视 侏罗纪世界` 自动从 TMDB 搜索中文片名并获取封面，封面上传图床独立目录（默认 `blog/bangumi`）；随后可发 `评分 8`、`#标签`、一句话影评，生成 `src/content/bangumi/anime/片名.md`（category: anime + subcategory: movie/tv）；**自己发图可替换封面**；TMDB 搜不到自动转手动模式（自己发图 + `名称:`/`类型:` 修正）；TMDB 连不上可在配置填反代地址
 - ✅ **书籍记录**（2026-08-23）：`/书籍 书名` 自己发封面图（必须），评分/标签/书评同影视，生成 `src/content/bangumi/book/书名.md`（category: book）
-- ✅ **导航网站**（2026-08-23）：`/导航 https://example.com` 自动通过 xxapi（v2.xxapi.cn，无需 Key）获取网站图标，图标上传图床独立目录（默认 `blog/daohang`）；随后键值对补 `名称/分类/描述/颜色` + `#标签`，生成 `src/content/daohang/域名-slug.md`（文件名对齐现有 app-pagescms-org.md 命名）
+- ✅ **导航网站**（2026-08-23，2026-09-21 对齐博客新格式）：`/导航 https://example.com` 自动通过 xxapi（v2.xxapi.cn，无需 Key）获取网站图标，图标上传图床独立目录（默认 `blog/daohang`）；向导从博客现有分类文件夹里选（或新建/回复分类名，缺省 `daohang_default_category`）；随后键值对补 `名称/描述` + `#标签`，生成 `src/content/daohang/<分类>/域名-slug.md`（分类=文件夹，条目只写 `name/url/icon/description/tags`）
 - ✅ 白名单控制：非白名单用户静默忽略，绝不抢占其他插件/AI 的消息处理
 - ✅ 微信图片下载兜底：适配器 aiohttp 被微信 CDN TLS 风控拒绝时，自动改用 curl 下载 + AES 解密
 
@@ -90,7 +90,7 @@
 | `/纪念日 结婚纪念日 农历5月20` / `/纪念日` | 纪念日（category: anniversary，每年重复全天），格式 `标题 日期 [@人物]`，日期支持 `1月1日` / `2026-01-01` / `农历5月20` |
 | `/影视 侏罗纪世界` | TMDB 自动搜片取封面（上传图床 `blog/bangumi`）；搜不到转手动模式：发封面图后**向导选类型**（1.电影 2.电视剧 3.动漫 4.纪录片 5.游戏）→ 评分 → 标签；游戏落 `bangumi/game/`、动漫/纪录片写对应 subcategory |
 | `/书籍 认知觉醒` | 书籍记录：自己发封面图（必须），评分/标签/书评同影视，生成 bangumi/book 条目 |
-| `/导航 https://example.com` | 添加导航网站：xxapi 自动取图标（上传图床 `blog/daohang`），**向导选分类文件夹**（列出现有分类，可选新建），随后发键值对 `名称/描述`，`/发布` 生成 `src/content/daohang/<分类>/` 条目（四字段，对齐博客 2026-09-21） |
+| `/导航 https://example.com` | 添加导航网站：xxapi 自动取图标（上传图床 `blog/daohang`），**向导选分类文件夹**（列出现有分类，可选新建），随后发键值对 `名称/描述` 与 `#标签`，`/发布` 生成 `src/content/daohang/<分类>/` 条目（`name/url/icon/description/tags`，对齐博客 2026-09-21） |
 | `/转载 https://mp.weixin.qq.com/s/xxxx` | 公众号文章转载：抓取正文转 Markdown、图片转存图床（默认 `blog/article`），生成博客文章（sourceLink + 转载声明）到配置目录（默认 `技术分享`），一次命令直达发布 |
 | `/提醒 列表` / `/提醒 取消 标题` | 查看/取消待提醒日程 |
 | `/发布` | 结束会话：上传图床 → 生成 markdown → GitHub 提交 |
@@ -141,7 +141,7 @@ pip install httpx pycryptodome
 python -m unittest discover -s tests
 ```
 
-188 个单元测试 + 集成冒烟测试（stub astrbot 依赖），覆盖命令解析、markdown 生成（含 YAML 边界与最新格式）、图床/高德/GitHub/TMDB/xxapi 响应解析、友链字段识别、账单支出/收入两类型（含还款记支出与负债下线回归）、向导全流程（笔记/相册/影视类型/账单确认，含选项错位与字段跳过回归）、日程/生日/纪念日解析（含农历与防呆）、影视（TMDB/手动/换封面/game 落盘）与书籍全流程、导航全流程、消息权限与放行逻辑。
+189 个单元测试 + 集成冒烟测试（stub astrbot 依赖），覆盖命令解析、markdown 生成（含 YAML 边界与最新格式）、图床/高德/GitHub/TMDB/xxapi 响应解析、友链字段识别、账单支出/收入两类型（含还款记支出与负债下线回归）、向导全流程（笔记/相册/影视类型/账单确认，含选项错位与字段跳过回归）、日程/生日/纪念日解析（含农历与防呆）、影视（TMDB/手动/换封面/game 落盘）与书籍全流程、导航全流程（文件夹分类 + tags）、消息权限与放行逻辑。
 
 ## 致谢
 
