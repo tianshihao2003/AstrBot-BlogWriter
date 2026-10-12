@@ -27,7 +27,7 @@
 - ✅ **影视记录**（2026-08-23）：`/影视 侏罗纪世界` 自动从 TMDB 搜索中文片名并获取封面，封面上传图床独立目录（默认 `blog/bangumi`）；随后可发 `评分 8`、`#标签`、一句话影评，生成 `src/content/bangumi/anime/片名.md`（category: anime + subcategory: movie/tv）；**自己发图可替换封面**；TMDB 搜不到自动转手动模式（自己发图 + `名称:`/`类型:` 修正）；TMDB 连不上可在配置填反代地址
 - ✅ **书籍记录**（2026-08-23）：`/书籍 书名` 自己发封面图（必须），评分/标签/书评同影视，生成 `src/content/bangumi/book/书名.md`（category: book）
 - ✅ **导航网站**（2026-08-23，2026-09-21 对齐博客新格式）：`/导航 https://example.com` 自动通过 xxapi（v2.xxapi.cn，无需 Key）获取网站图标，图标上传图床独立目录（默认 `blog/daohang`）；向导从博客现有分类文件夹里选（或新建/回复分类名，缺省 `daohang_default_category`）；随后键值对补 `名称/描述` + `#标签`，生成 `src/content/daohang/<分类>/域名-slug.md`（分类=文件夹，条目只写 `name/url/icon/description/tags`）
-- ✅ 白名单控制：非白名单用户静默忽略，绝不抢占其他插件/AI 的消息处理
+- ✅ 白名单控制：非白名单用户静默忽略（私聊发命令只回一条含其 ID 的提示，见「平台支持」），绝不抢占其他插件/AI 的消息处理
 - ✅ 微信图片下载兜底：适配器 aiohttp 被微信 CDN TLS 风控拒绝时，自动改用 curl 下载 + AES 解密
 
 ## 安装
@@ -63,8 +63,9 @@
 | default_note_dir | 笔记默认分类目录，默认 `日常随笔` |
 | friend_default_avatar | 友链默认头像（未提供头像链接时），默认 `/assets/ziyuan/tx.webp` |
 | friend_tags | 友链默认标签，默认 `["Blog"]` |
-| allow_users | 允许使用的用户 ID 列表（个人微信为 `xxx@im.wechat` 格式）；空列表 = 全部拒绝 |
-| allow_groups | 允许交互的群号列表（QQ 群号）；留空 = 不限制群；填了以后列表外的群一律静默 |
+| allow_users | 允许使用的用户 ID 列表（各平台的 ID 形态见「平台支持」；AstrBot 全局 `admins_id` 里的管理员无需重复填写）；空列表 = 全部拒绝 |
+| unauthorized_hint | 非白名单用户在私聊里发插件命令时回一条含其 ID 的提示，默认 `true`（群聊始终静默） |
+| allow_groups | 允许交互的群号列表（QQ 群号；QQ 官方机器人填 `group_openid`）；留空 = 不限制群；填了以后列表外的群一律静默 |
 | bill_default_account / bill_default_category | 账单默认账户/分类（解析为「其他」时替换） |
 | schedule_default_priority / schedule_remind_before | 日程默认优先级/默认提前提醒分钟（0=准点） |
 
@@ -114,7 +115,24 @@
 
 - 会话 30 分钟无操作自动作废
 - 同一用户同时只允许一个会话
-- 非白名单用户的消息一律静默放行，不干扰其他功能
+- 非白名单用户的消息静默放行，不干扰其他功能；仅「私聊里发插件命令」会回一条含 ID 的一次性提示（`unauthorized_hint=false` 可关）
+
+## 平台支持（2026-09-30 v1.0.57）
+
+插件跟随 AstrBot 的事件分发，在已接入的所有平台上都能用；**白名单是全局一份**（`allow_users`），而各平台的发送者 ID 形态不一样：
+
+| 平台（适配器名） | 发送者 ID 是什么 |
+|---|---|
+| QQ（`aiocqhttp` / NapCat） | QQ 号 |
+| 微信（`weixin_oc`） | wxid |
+| QQ 官方机器人（`qq_official` / `qq_official_webhook`） | openid（群里是 member_openid） |
+| 企业微信含微信客服（`wecom`） | 企业成员 UserID（客服会话是 external_userid） |
+
+- **两种加白名单的方式**：① 把上表的 ID 填进插件 `allow_users`；② 填进 AstrBot 全局配置的 `admins_id`——`admins_id` 里的用户在任意平台都能用，不用重复维护（插件读 `event.is_admin()`）。
+- **不知道自己的 ID**：用未授权账号在**私聊**里发任意插件命令，插件会回一条含该 ID 的提示，照着填进 `allow_users` 即可（配置 `unauthorized_hint=false` 可关闭；**群聊里永远静默**，非命令消息也静默）。
+- **群聊白名单** `allow_groups`：QQ 群填群号；QQ 官方机器人填 `group_openid`（不是群号），留空 = 不限制。
+- **平台差异**：企业微信不支持主动推送（`support_proactive_message=False`），到点提醒送不到——创建带时间的日程时插件会在发布回复里提示改用 QQ/微信；QQ 官方机器人的图片是外链 CDN，自 v1.0.57 起下载统一带浏览器 UA（避免被 CDN 403）。
+- **诊断**：插件所有入口/权限日志都带 `platform=` 字段（如 `收到消息 platform=wecom user=xxx cmd=帮助`），排查「发了没反应」先看这行在不在。
 
 ## 注意事项
 
@@ -141,7 +159,7 @@ pip install httpx pycryptodome
 python -m unittest discover -s tests
 ```
 
-189 个单元测试 + 集成冒烟测试（stub astrbot 依赖），覆盖命令解析、markdown 生成（含 YAML 边界与最新格式）、图床/高德/GitHub/TMDB/xxapi 响应解析、友链字段识别、账单支出/收入两类型（含还款记支出与负债下线回归）、向导全流程（笔记/相册/影视类型/账单确认，含选项错位与字段跳过回归）、日程/生日/纪念日解析（含农历与防呆）、影视（TMDB/手动/换封面/game 落盘）与书籍全流程、导航全流程（文件夹分类 + tags）、消息权限与放行逻辑。
+198 个单元测试 + 集成冒烟测试（stub astrbot 依赖），覆盖命令解析、markdown 生成（含 YAML 边界与最新格式）、图床/高德/GitHub/TMDB/xxapi 响应解析、友链字段识别、账单支出/收入两类型（含还款记支出与负债下线回归）、向导全流程（笔记/相册/影视类型/账单确认，含选项错位与字段跳过回归）、日程/生日/纪念日解析（含农历与防呆）、影视（TMDB/手动/换封面/game 落盘）与书籍全流程、导航全流程（文件夹分类 + tags）、平台兼容（企业微信/QQ 官方机器人的双白名单、未授权 ID 提示与静默边界、提醒平台能力提示）、消息权限与放行逻辑。
 
 ## 致谢
 

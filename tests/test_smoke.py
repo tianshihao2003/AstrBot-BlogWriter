@@ -528,23 +528,40 @@ class TestFlow(unittest.TestCase):
         self.assertEqual(len(self.plugin.committed), 0)
 
     def test_permission_denied_silent(self):
-        """非白名单用户：任何消息都不回复（放行给其他功能），只写日志。"""
-        ev = types.SimpleNamespace(
-            message_str="/动态 x",
-            get_sender_id=lambda: "hacker",
-            get_sender_name=lambda: "黑客",
-            get_messages=lambda: [],
-            plain_result=lambda t: types.SimpleNamespace(text=t),
-        )
+        """非白名单用户：群聊与非命令一律静默放行（不抢其他插件/AI）；
+        私聊发明确命令时只回一条含其 ID 的提示（2026-09-30 v1.0.57 起，
+        便于跨平台把 ID 加进 allow_users，可用 unauthorized_hint 关闭）。"""
 
-        async def run():
+        async def run(ev):
             out = []
             async for r in self.plugin.on_message(ev):
-                out.append(r)
+                out.append(r.text)
             return out
 
-        replies = asyncio.get_event_loop().run_until_complete(run())
+        def ev(text, origin=""):
+            return types.SimpleNamespace(
+                message_str=text,
+                get_sender_id=lambda: "hacker",
+                get_sender_name=lambda: "黑客",
+                get_messages=lambda: [],
+                plain_result=lambda t: types.SimpleNamespace(text=t),
+                unified_msg_origin=origin,
+            )
+
+        # 群聊：完全静默（含命令）
+        replies = asyncio.get_event_loop().run_until_complete(
+            run(ev("/动态 x", origin="aiocqhttp:GroupMessage:123456"))
+        )
         self.assertEqual(len(replies), 0)
+        # 私聊非命令：静默
+        replies = asyncio.get_event_loop().run_until_complete(run(ev("随便聊聊")))
+        self.assertEqual(len(replies), 0)
+        # 私聊命令：只回 ID 提示，且不建会话
+        replies = asyncio.get_event_loop().run_until_complete(run(ev("/动态 x")))
+        self.assertEqual(len(replies), 1)
+        self.assertIn("hacker", replies[0])
+        self.assertIn("allow_users", replies[0])
+        self.assertNotIn("hacker", self.plugin._sessions)
 
     def test_permission_denied_image_no_hint(self):
         """回归（2026-09-04 群聊回人 bug）：非白名单用户无会话发图片，
@@ -1341,9 +1358,28 @@ class TestBillSchedule(unittest.TestCase):
         self.assertEqual(sess.meta.get("category", "schedule"), "schedule")
 
     def test_bill_non_whitelist_silent(self):
-        # 白名单外用户发账单应静默
-        replies = asyncio.get_event_loop().run_until_complete(self._send("/账单 今天午餐花了10", sender="hacker"))
+        # 白名单外用户：群聊静默；私聊发命令只回一条 ID 提示，且不建会话
+        group_ev = types.SimpleNamespace(
+            message_str="/账单 今天午餐花了10",
+            get_sender_id=lambda: "hacker",
+            get_sender_name=lambda: "黑客",
+            get_messages=lambda: [],
+            plain_result=lambda t: types.SimpleNamespace(text=t),
+            unified_msg_origin="aiocqhttp:GroupMessage:123456",
+        )
+        async def run_ev(ev):
+            out = []
+            async for r in self.plugin.on_message(ev):
+                out.append(r.text)
+            return out
+
+        replies = asyncio.get_event_loop().run_until_complete(run_ev(group_ev))
         self.assertEqual(len(replies), 0)
+        replies = asyncio.get_event_loop().run_until_complete(
+            self._send("/账单 今天午餐花了10", sender="hacker")
+        )
+        self.assertEqual(len(replies), 1)
+        self.assertIn("hacker", replies[0])
         self.assertNotIn("hacker", self.plugin._sessions)
 
 
@@ -1945,6 +1981,134 @@ class TestArticleFlow(unittest.TestCase):
             self.assertEqual(len(self.plugin.committed), 0)
         finally:
             self._restore(orig)
+
+
+class TestPlatformCompat(unittest.TestCase):
+    """企业微信 / QQ 官方机器人平台适配（2026-09-30 v1.0.57）：
+
+    - allow_users 与 AstrBot 全局 admins_id（event.is_admin）双白名单
+    - 非白名单用户私聊发命令 → 回一条含其 ID 的提示（可关、带冷却）；群聊与非命令仍静默
+    - 平台不支持主动推送（企业微信）时，日程发布回复里如实提示提醒可能收不到
+    """
+
+    def setUp(self):
+        self.config = {
+            "github_token": "tok",
+            "github_repo": "tianshihao2003/dumplingandcakeblog",
+            "github_branch": "main",
+            "allow_users": ["u1"],
+        }
+        import main as plugin_main
+
+        class Stubbed(plugin_main.BlogWriter):
+            async def _commit_md(self, path, md, now):
+                self.committed.append((path, md))
+                return True, path, ""
+
+            def _schedule_remind(self, user_id, title, remind_at, *args, **kwargs):
+                self.scheduled.append((user_id, title, remind_at))
+
+            async def terminate(self):
+                pass
+
+        self.plugin = Stubbed(context=types.SimpleNamespace(), config=dict(self.config))
+        self.plugin.committed = []
+        self.plugin.scheduled = []
+
+    @staticmethod
+    def _ev(text, sender="u1", platform="qq_official", group=False, admin=False, proactive=True):
+        """平台化事件桩：qq_official / wecom 的私聊与群聊、是否全局管理员、是否支持主动推送。"""
+        origin = "{}:{}:{}".format(
+            platform, "GroupMessage" if group else "FriendMessage", "sess-1"
+        )
+        return types.SimpleNamespace(
+            message_str=text,
+            get_sender_id=lambda: sender,
+            get_sender_name=lambda: "用户",
+            get_messages=lambda: [],
+            plain_result=lambda t: types.SimpleNamespace(text=t),
+            message_obj=types.SimpleNamespace(raw_message={}),
+            unified_msg_origin=origin,
+            get_platform_name=lambda: platform,
+            is_admin=lambda: admin,
+            platform_meta=types.SimpleNamespace(support_proactive_message=proactive),
+        )
+
+    async def _send_ev(self, ev):
+        out = []
+        async for r in self.plugin.on_message(ev):
+            out.append(r)
+        return [o.text for o in out]
+
+    def _run(self, ev):
+        return asyncio.get_event_loop().run_until_complete(self._send_ev(ev))
+
+    # ---------- 双白名单 ----------
+
+    def test_admin_id_bypasses_allow_users(self):
+        # AstrBot 全局 admins_id（event.is_admin()）里的用户在任意平台都能用，无需写进 allow_users
+        self.plugin.config["allow_users"] = []
+        replies = self._run(self._ev("/帮助", sender="wxid_admin", platform="wecom", admin=True))
+        self.assertEqual(len(replies), 1)
+        self.assertIn("BlogWriter", replies[0])
+        # 同一平台的非管理员（不在任何白名单）仍被拒
+        replies = self._run(self._ev("/帮助", sender="wxid_other", platform="wecom"))
+        self.assertIn("allow_users", replies[0])
+
+    def test_whitelisted_on_new_platform(self):
+        # 把新平台的 ID 写进 allow_users 后，命令正常执行
+        self.plugin.config["allow_users"] = ["u1", "openid-abc"]
+        replies = self._run(self._ev("/帮助", sender="openid-abc", platform="qq_official"))
+        self.assertEqual(len(replies), 1)
+        self.assertIn("BlogWriter", replies[0])
+
+    # ---------- 未授权 ID 提示 ----------
+
+    def test_unauthorized_hint_private_command(self):
+        replies = self._run(self._ev("/帮助", sender="openid-abc", platform="qq_official"))
+        self.assertEqual(len(replies), 1)
+        self.assertIn("openid-abc", replies[0])
+        self.assertIn("allow_users", replies[0])
+        self.assertIn("QQ 官方机器人", replies[0])
+        # 冷却期内再发命令不重复提示
+        replies = self._run(self._ev("/帮助", sender="openid-abc", platform="qq_official"))
+        self.assertEqual(len(replies), 0)
+
+    def test_unauthorized_hint_wecom_label(self):
+        replies = self._run(self._ev("/动态 测试", sender="zhangsan", platform="wecom"))
+        self.assertEqual(len(replies), 1)
+        self.assertIn("zhangsan", replies[0])
+        self.assertIn("企业微信", replies[0])
+
+    def test_unauthorized_hint_group_silent(self):
+        # 群聊一律静默，不抢其他插件/AI 的消息
+        replies = self._run(
+            self._ev("/帮助", sender="openid-abc", platform="qq_official", group=True)
+        )
+        self.assertEqual(len(replies), 0)
+
+    def test_unauthorized_hint_only_for_commands(self):
+        replies = self._run(self._ev("今天天气不错", sender="openid-abc", platform="qq_official"))
+        self.assertEqual(len(replies), 0)
+
+    def test_unauthorized_hint_can_be_disabled(self):
+        self.plugin.config["unauthorized_hint"] = False
+        replies = self._run(self._ev("/帮助", sender="openid-abc", platform="qq_official"))
+        self.assertEqual(len(replies), 0)
+
+    # ---------- 提醒平台能力 ----------
+
+    def test_proactive_unsupported_note_on_schedule(self):
+        self._run(self._ev("/日程 明天下午3点在会议室A开周会", platform="wecom", proactive=False))
+        replies = self._run(self._ev("/发布", platform="wecom", proactive=False))
+        self.assertTrue(any("发布成功" in r for r in replies))
+        self.assertTrue(any("主动推送" in r for r in replies))
+
+    def test_proactive_supported_no_note(self):
+        self._run(self._ev("/日程 明天下午3点在会议室A开周会", platform="qq_official", proactive=True))
+        replies = self._run(self._ev("/发布", platform="qq_official", proactive=True))
+        self.assertTrue(any("发布成功" in r for r in replies))
+        self.assertFalse(any("主动推送" in r for r in replies))
 
 
 if __name__ == "__main__":

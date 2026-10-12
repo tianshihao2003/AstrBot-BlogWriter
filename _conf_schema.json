@@ -100,12 +100,17 @@
     "default": ["Blog"]
   },
   "allow_users": {
-    "description": "允许使用的用户 ID 列表（个人微信为 wxid）；空列表 = 全部拒绝",
+    "description": "允许使用的用户 ID 列表（个人微信为 wxid、QQ 为 QQ 号、QQ 官方机器人为 openid、企业微信为企业成员 UserID）；空列表 = 全部拒绝。AstrBot 全局配置 admins_id 里的管理员无需重复填写",
     "type": "list",
     "default": []
   },
+  "unauthorized_hint": {
+    "description": "非白名单用户在私聊里发插件命令时，回复一条含其 ID 的提示（把它加进 allow_users 即可用；群聊始终静默）",
+    "type": "bool",
+    "default": true
+  },
   "allow_groups": {
-    "description": "允许交互的群号列表（QQ 群号）；留空 = 不限制群（但无会话图片提示仅私聊生效）。填了以后，不在列表内的群一律静默（含命令）",
+    "description": "允许交互的群号列表（QQ 群号；QQ 官方机器人填 group_openid 串）；留空 = 不限制群（但无会话图片提示仅私聊生效）。填了以后，不在列表内的群一律静默（含命令）",
     "type": "list",
     "default": []
   },

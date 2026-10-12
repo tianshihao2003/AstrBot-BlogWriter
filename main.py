@@ -23,6 +23,7 @@ import base64
 import json
 import os
 import re
+import time
 import urllib.parse
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -223,6 +224,7 @@ class BlogWriter(Star):
         self._sessions: Dict[str, Session] = {}
         self._lock = asyncio.Lock()
         self._client = None
+        self._hint_at: Dict[str, float] = {}  # 非白名单 ID 提示的冷却时间戳（monotonic）
         self._reminders: List[Tuple[str, str, datetime]] = []
         self._reminder_file = self._resolve_reminder_file()
         self._loop = None
@@ -511,6 +513,108 @@ class BlogWriter(Star):
         if not allow:
             return False
         return user_id in [str(x).strip() for x in allow]
+
+    # ---------- 平台兼容（2026-09-30 v1.0.57：企业微信 / QQ 官方机器人） ----------
+    # 背景：不同平台的 sender_id 完全不同（NapCat=QQ 号、微信=wxid、QQ 官方=openid、
+    # 企业微信=企业成员 UserID / 客服 external_userid），而 allow_users 是全局一份，
+    # 所以新平台接入时要么把它的 ID 加进 allow_users，要么用 AstrBot 全局 admins_id。
+
+    # 适配器类型名 → 人类可读平台名（提示文案与日志用）
+    _PLATFORM_LABELS = {
+        "aiocqhttp": "QQ（NapCat）",
+        "qq_official": "QQ 官方机器人",
+        "qq_official_webhook": "QQ 官方机器人（Webhook）",
+        "wecom": "企业微信（含微信客服）",
+        "wecom_ai_bot": "企业微信智能机器人",
+        "weixin_oc": "微信",
+        "weixin_official_account": "微信公众号",
+    }
+    # 非白名单 ID 提示的冷却（秒）：同一用户 5 分钟只提示一次，避免刷屏
+    _HINT_COOLDOWN = 300
+
+    @staticmethod
+    def _platform_name(event: AstrMessageEvent) -> str:
+        """事件所属平台的适配器类型名（aiocqhttp / qq_official / wecom / weixin_oc ...）。
+
+        优先用官方 API get_platform_name()；老版本框架没有该方法时回退解析
+        unified_msg_origin 的 platform 段（格式 platform_id:message_type:session_id）。
+        """
+        try:
+            getter = getattr(event, "get_platform_name", None)
+            if callable(getter):
+                name = str(getter() or "").strip()
+                if name:
+                    return name
+        except Exception:
+            pass
+        try:
+            origin = str(getattr(event, "unified_msg_origin", "") or "")
+            if ":" in origin:
+                return origin.split(":", 1)[0].strip()
+        except Exception:
+            pass
+        return ""
+
+    def _platform_label(self, event: AstrMessageEvent) -> str:
+        """平台中文名，用在给用户看的提示里（未登记的平台名原样返回）。"""
+        name = self._platform_name(event)
+        return self._PLATFORM_LABELS.get(name, name or "未知平台")
+
+    @staticmethod
+    def _is_admin_event(event: AstrMessageEvent) -> bool:
+        """发送者是否是 AstrBot 全局 admins_id 里的管理员。
+
+        框架在唤醒检查阶段按全局配置 admins_id 打 role=admin（event.is_admin()），
+        这里只读不写；拿不到（老版本框架/测试桩）返回 False。
+        """
+        try:
+            checker = getattr(event, "is_admin", None)
+            if callable(checker):
+                return bool(checker())
+        except Exception:
+            pass
+        return False
+
+    @staticmethod
+    def _proactive_supported(event: AstrMessageEvent) -> bool:
+        """平台是否支持主动推送（定时提醒依赖它）。
+
+        企业微信（客服/应用，platform_meta.support_proactive_message=False）不支持，
+        到点提醒送不到；QQ 官方/微信/NapCat 支持。
+        """
+        try:
+            meta = getattr(event, "platform_meta", None) or getattr(event, "platform", None)
+            return bool(getattr(meta, "support_proactive_message", True))
+        except Exception:
+            return True
+
+    def _unauthorized_hint_text(self, event: AstrMessageEvent, user_id: str, cmd: Optional[str]) -> str:
+        """非白名单用户发命令时的一次性「ID 提示」（跨平台加白名单用）。
+
+        只在「开关开启 + 明确命令 + 私聊 + 冷却已过」时返回文本；群聊与非命令返回 ""，
+        保持既有「非白名单静默放行、不抢其他插件/AI」的语义。
+        """
+        if not self._cfg("unauthorized_hint", True):
+            return ""
+        if cmd not in COMMANDS:
+            return ""
+        if self._is_group_message(event):
+            return ""
+        now_mono = time.monotonic()
+        if now_mono - self._hint_at.get(user_id, 0.0) < self._HINT_COOLDOWN:
+            return ""
+        self._hint_at[user_id] = now_mono
+        if len(self._hint_at) > 500:  # 防内存膨胀：只留最近有活动的 200 条
+            keep = sorted(self._hint_at.items(), key=lambda kv: kv[1], reverse=True)[:200]
+            self._hint_at = dict(keep)
+        return (
+            "⚠ BlogWriter：你还不在白名单里（平台：{}）。\n"
+            "把这个 ID 加进插件配置 allow_users 就能用了：\n"
+            "{}\n"
+            "（加进 AstrBot 全局配置的 admins_id 同样生效）".format(
+                self._platform_label(event), user_id
+            )
+        )
 
     @staticmethod
     def _is_group_message(event: AstrMessageEvent) -> bool:
@@ -1101,17 +1205,34 @@ class BlogWriter(Star):
             cmd, args, raw = parse_message(event.message_str)
             session = self._session(user_id)
             logger.info(
-                "BlogWriter: 收到消息 user=%s cmd=%s has_session=%s msg_str=%r",
+                "BlogWriter: 收到消息 platform=%s user=%s cmd=%s has_session=%s msg_str=%r",
+                self._platform_name(event) or "?",
                 user_id, cmd, session is not None, (event.message_str or "")[:60],
             )
 
-            # 非白名单用户：静默忽略，不回复（避免在群聊中抢占其他插件/AI 的消息处理，
-            # 也防止非白名单用户触发「无会话媒体提示」）
-            if not self._allowed(user_id):
+            # 白名单：allow_users 列表，或 AstrBot 全局 admins_id 里的管理员（跨平台通用）。
+            # 非白名单用户：私聊发明确命令时回一条含其 ID 的提示（便于加白名单，可关），
+            # 其余情况（群聊 / 非命令）一律静默忽略，不回复、不抢其他插件/AI 的消息处理
+            if not self._allowed(user_id) and not self._is_admin_event(event):
+                hint = self._unauthorized_hint_text(event, user_id, cmd)
+                if hint:
+                    logger.info(
+                        "BlogWriter: 非白名单用户发命令 %s（platform=%s id=%s），已回复 ID 提示",
+                        cmd, self._platform_name(event) or "?", user_id,
+                    )
+                    # 本条消息已被插件完整消费，阻断传播（否则会落到框架 LLM 阶段报错）
+                    _stop = getattr(event, "stop_event", None)
+                    if callable(_stop):
+                        _stop()
+                    yield event.plain_result(hint)
+                    return
+                _name_getter = getattr(event, "get_sender_name", None)
                 logger.info(
-                    "BlogWriter: 用户 %s（id=%s）无权限，已忽略。如需使用，请将 ID 加入 allow_users 配置。",
-                    event.get_sender_name() or "?",
+                    "BlogWriter: 用户 %s（id=%s，platform=%s）无权限，已忽略。"
+                    "如需使用，请把该 ID 加入插件 allow_users 或 AstrBot 全局 admins_id。",
+                    (_name_getter() if callable(_name_getter) else "") or "?",
                     user_id,
+                    self._platform_name(event) or "?",
                 )
                 return
 
@@ -2062,6 +2183,7 @@ class BlogWriter(Star):
             return event.plain_result("GitHub 提交失败：{}".format(err))
 
         # 日程提醒：成功后若为 schedule 且含时间则调用 _schedule_remind
+        remind_note = ""
         if session.kind in ("schedule", "birthday", "anniversary"):
             try:
                 date_val = session.meta.get("date")
@@ -2098,6 +2220,12 @@ class BlogWriter(Star):
                         except Exception:
                             origin = user_id
                         self._schedule_remind(user_id, title, remind_at, origin, remind_before)
+                        # 平台不支持主动推送（如企业微信客服/应用）：到点提醒送不到，如实提示
+                        if not self._proactive_supported(event):
+                            remind_note = (
+                                "\n\n⚠ 当前平台（{}）不支持主动推送，到点提醒可能收不到；"
+                                "需要提醒的日程建议在 QQ / 微信 上创建。".format(self._platform_label(event))
+                            )
             except Exception as e:
                 logger.warning("BlogWriter: 调度提醒异常: %s", e)
 
@@ -2106,7 +2234,9 @@ class BlogWriter(Star):
             clean_filename_part(session.meta.get("note_dir") or "日常随笔", fallback="日常随笔")
         ) if session.kind == "note" and index_created else ""
         return event.plain_result(
-            "发布成功 ✅\n\n文件：{}\n博客：https://blog.tsh520.cn{}{}".format(final_path, link, created_hint)
+            "发布成功 ✅\n\n文件：{}\n博客：https://blog.tsh520.cn{}{}{}".format(
+                final_path, link, created_hint, remind_note
+            )
         )
 
     # ---------- 图片/视频 ----------
@@ -2173,8 +2303,18 @@ class BlogWriter(Star):
             logger.warning("BlogWriter 读取本地图片失败: {} ({})".format(ref, e))
             return None
 
+    # 平台媒体多为外链 CDN（QQ 官方 multimedia.nt.qq.com.cn、企业微信 wework.qpic.cn、
+    # 微信 mmbiz 等），部分 CDN 对 python-httpx 默认 UA 直接 403，统一带浏览器 UA
+    # （2026-09-30 v1.0.57 适配企业微信/QQ 官方机器人时加）
+    _DOWNLOAD_UA = (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+    )
+
     async def _download_http(self, url: str, referer: str = "") -> Optional[bytes]:
-        headers = {"Referer": referer} if referer else None
+        headers = {"User-Agent": self._DOWNLOAD_UA}
+        if referer:
+            headers["Referer"] = referer
         for attempt in range(RETRY_COUNT + 1):
             try:
                 resp = await self._get_client().get(url, headers=headers)
