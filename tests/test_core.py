@@ -9,20 +9,15 @@ from datetime import datetime, timedelta
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from blog_writer_core import (  # noqa: E402
-    BILL_ACCOUNTS,
-    BILL_CATEGORIES,
-    SCHEDULE_PRIORITIES,
     SESSION_TIMEOUT,
     Session,
     build_album_md,
     build_amap_url,
-    build_bill_md,
     build_github_put_body,
     build_imgbed_upload,
     build_moment_md,
     build_note_md,
     build_place_md,
-    build_schedule_md,
     build_upload_url,
     build_friend_md,
     clean_filename_part,
@@ -35,7 +30,6 @@ from blog_writer_core import (  # noqa: E402
     parse_album,
     parse_album_frontmatter,
     parse_amap_response,
-    parse_bill,
     parse_dynamic,
     parse_friend_text,
     parse_github_put_response,
@@ -43,10 +37,7 @@ from blog_writer_core import (  # noqa: E402
     parse_message,
     parse_note,
     parse_place,
-    parse_schedule,
-    parse_schedules_batch,
     place_filename,
-    schedule_filename,
     upload_base_host,
     validate_friend_data,
     with_suffix,
@@ -563,240 +554,6 @@ class TestFriend(unittest.TestCase):
         self.assertEqual(next_friend_index(["01-a.md"]), 2)
         self.assertEqual(next_friend_index([]), 1)
         self.assertEqual(next_friend_index(["not-numbered.md"]), 1)
-
-
-class TestBillSchedule(unittest.TestCase):
-    def test_parse_bill_natural(self):
-        data, err = parse_bill("今天午餐微信花了32")
-        self.assertEqual(err, "")
-        self.assertEqual(data["amount"], -32)
-        self.assertEqual(data["category"], "餐饮")
-        self.assertEqual(data["account"], "微信")
-
-    def test_parse_bill_income(self):
-        data, _ = parse_bill("发工资12000 银行卡")
-        self.assertEqual(data["type"], "income")
-        self.assertEqual(data["amount"], 12000)
-
-    def test_parse_bill_borrow_rejected(self):
-        # 负债类型已下线（博客账单仅支持 支出/收入）：借款/欠款返回错误
-        data, err = parse_bill("花呗借款5000")
-        self.assertIsNone(data)
-        self.assertIn("负债类型已下线", err)
-
-    def test_parse_bill_repay_as_expense(self):
-        # 还款 = 资金流出，记为普通支出（分类「还款」，金额为负）
-        data, err = parse_bill("花呗还款2000")
-        self.assertEqual(err, "")
-        self.assertEqual(data["type"], "expense")
-        self.assertEqual(data["amount"], -2000)
-        self.assertEqual(data["category"], "还款")
-        self.assertEqual(data["account"], "花呗")
-
-    def test_parse_bill_type_prefix(self):
-        # 首词显式类型前缀
-        data, _ = parse_bill("支出 午餐微信花了32")
-        self.assertEqual(data["type"], "expense")
-        self.assertEqual(data["amount"], -32)
-        data2, _ = parse_bill("收入 兼职到手800 支付宝")
-        self.assertEqual(data2["type"], "income")
-        self.assertEqual(data2["amount"], 800)
-        # 「还款」前缀 → 支出、分类固定「还款」
-        data3, _ = parse_bill("还款 2000 微信")
-        self.assertEqual(data3["type"], "expense")
-        self.assertEqual(data3["amount"], -2000)
-        self.assertEqual(data3["category"], "还款")
-
-    def test_parse_bill_prefix_word_alone_not_stripped(self):
-        # 「消费」后无空格内容时（如「消费30」），不作为前缀剥离，按关键词正常解析
-        data, _ = parse_bill("消费30")
-        self.assertEqual(data["type"], "expense")
-        self.assertEqual(data["amount"], -30)
-
-    def test_parse_bill_time_expressions(self):
-        # 时间表达提取 → time 字段 HH:mm；标题不混入时间词
-        cases = {
-            "晚上8点吃了火锅60": "20:00",
-            "下午3点半打车12": "15:30",
-            "12点30分午饭20": "12:30",
-            "14:30 奶茶18": "14:30",
-            "早上6点买了包子5": "06:00",
-        }
-        for text, expect in cases.items():
-            data, err = parse_bill(text)
-            self.assertEqual(err, "", text)
-            self.assertEqual(data["time"], expect, text)
-        # 无时间词 → 回退当前时刻（HH:mm 格式）
-        data, _ = parse_bill("午餐30")
-        self.assertRegex(data["time"], r"^\d{2}:\d{2}$")
-        # 标题剥离时间词
-        hotpot, _ = parse_bill("晚上8点吃了火锅60")
-        self.assertNotIn("8点", hotpot["title"])
-
-    def test_build_bill_md_includes_time(self):
-        # build_bill_md 输出 time 字段（HH:mm 带引号），旧数据缺 time 时回退 now
-        from blog_writer_core import build_bill_md
-        md = build_bill_md(
-            {
-                "title": "买鱼",
-                "amount": -22,
-                "type": "expense",
-                "category": "水产",
-                "account": "微信",
-                "date": datetime(2026, 9, 5),
-                "time": "09:05",
-                "description": "买鱼",
-            },
-            now=datetime(2026, 9, 5, 10, 0),
-        )
-        self.assertIn('time: "09:05"', md)
-        # time 缺失/非法 → 回退 now 的 HH:mm
-        md2 = build_bill_md(
-            {
-                "title": "买鱼",
-                "amount": -22,
-                "type": "expense",
-                "category": "水产",
-                "account": "微信",
-                "date": datetime(2026, 9, 5),
-            },
-            now=datetime(2026, 9, 5, 10, 0),
-        )
-        self.assertIn('time: "10:00"', md2)
-
-    def test_parse_bill_category_prefix(self):
-        # 首词分类前缀：关键词没命中的冷门消费（如理发）可显式指定分类
-        data, _ = parse_bill("食品酒水 买了箱牛奶45")
-        self.assertEqual(data["category"], "食品酒水")
-        self.assertEqual(data["title"], "买了箱牛奶")
-        # 类型 + 分类组合前缀
-        data2, _ = parse_bill("支出 餐饮 午餐30")
-        self.assertEqual(data2["type"], "expense")
-        self.assertEqual(data2["category"], "餐饮")
-        self.assertEqual(data2["title"], "午餐")
-
-    def test_build_bill_md(self):
-        md = build_bill_md(
-            {
-                "title": "午餐",
-                "amount": -32,
-                "type": "expense",
-                "category": "餐饮",
-                "account": "微信",
-                "date": datetime(2026, 8, 21),
-                "description": "午餐",
-            },
-            datetime(2026, 8, 21),
-        )
-        # 2026-08 对齐博客最新 bills 格式：字符串带引号、tags 行内数组、date/amount 不带
-        self.assertIn("amount: -32", md)
-        self.assertIn('category: "餐饮"', md)
-        self.assertIn('title: "午餐"', md)
-        self.assertIn("date: 2026-08-21", md)
-        self.assertIn('tags: ["餐饮"]', md)
-
-    def test_parse_schedule_natural(self):
-        data, _ = parse_schedule("明天下午3点高优在会议室A开周会 每周重复 提前15分钟")
-        self.assertEqual(data["title"], "周会")
-        self.assertEqual(data["priority"], "high")
-        self.assertEqual(data["location"], "会议室A")
-        self.assertEqual(data["repeat"], "每周")
-        self.assertEqual(data["remind_before"], 15)
-
-    def test_build_schedule_md(self):
-        md = build_schedule_md(
-            {"title": "周会", "date": datetime(2026, 8, 22, 15, 0), "priority": "high", "location": "会议室A"},
-            datetime(2026, 8, 22),
-        )
-        # 2026-08 对齐博客最新 schedules 格式：字符串带引号
-        self.assertIn('title: "周会"', md)
-        self.assertIn("date: 2026-08-22 15:00:00", md)
-        if yaml:
-            fm = yaml.safe_load(md.split("---")[1])
-            self.assertEqual(fm["title"], "周会")
-            self.assertEqual(fm["location"], "会议室A")
-
-    def test_build_schedule_md_empty_fields_omitted(self):
-        # 空地点/重复不写字段（对齐现有文件：示例占位无 location/repeat）
-        md = build_schedule_md({"title": "示例", "date": datetime(2026, 8, 22), "allDay": True}, datetime(2026, 8, 22))
-        self.assertNotIn("location:", md)
-        self.assertNotIn("repeat:", md)
-        self.assertIn("date: 2026-08-22\n", md)  # 全天只写日期
-
-    def test_schedules_batch_lunar(self):
-        # 2026-08 农历生日：isLunar/lunarMonth/lunarDay，不存公历 date
-        items, err = parse_schedules_batch("我的生日农历8.24对象12.22妈8.7大姐11.22爸12.14二姐4.4都是农历")
-        self.assertEqual(err, "")
-        self.assertEqual(len(items), 6)
-        persons = [it["person"] for it in items]
-        self.assertEqual(persons, ["我", "对象", "我妈", "大姐", "我爸", "二姐"])
-        first = items[0]
-        self.assertTrue(first["isLunar"])
-        self.assertEqual(first["lunarMonth"], 8)
-        self.assertEqual(first["lunarDay"], 24)
-        self.assertNotIn("date", first)
-        md = build_schedule_md(first)
-        self.assertIn("isLunar: true", md)
-        self.assertIn("lunarMonth: 8", md)
-        self.assertIn("lunarDay: 24", md)
-        self.assertNotIn("date:", md)
-        self.assertEqual(schedule_filename(first), "lunar-8-24")
-
-    def test_schedules_batch_solar(self):
-        # 公历生日：存 date（今年已过则顺延明年）
-        items, err = parse_schedules_batch("我生日3.15对象生日9.20")
-        self.assertEqual(err, "")
-        self.assertEqual(len(items), 2)
-        self.assertFalse(items[0]["isLunar"])
-        self.assertIn("date", items[0])
-        self.assertEqual(schedule_filename(items[0], datetime(2026, 8, 23)), "2027-03-15")
-
-    def test_parse_anniversary(self):
-        from blog_writer_core import parse_anniversary
-
-        # 公历月日 + @人物（对齐博客现有“我和宝宝认识的纪念日”）
-        data, err = parse_anniversary("我和宝宝认识的纪念日 1月1日 @宝宝", datetime(2026, 8, 23))
-        self.assertEqual(err, "")
-        self.assertEqual(data["title"], "我和宝宝认识的纪念日")
-        self.assertEqual(data["category"], "anniversary")
-        self.assertEqual(data["repeat"], "每年")
-        self.assertTrue(data["allDay"])
-        self.assertEqual(data["person"], "宝宝")
-        self.assertEqual(data["date"], datetime(2026, 1, 1))
-        self.assertNotIn("isLunar", data)
-
-        # 农历
-        data2, _ = parse_anniversary("结婚纪念日 农历5月20", datetime(2026, 8, 23))
-        self.assertTrue(data2["isLunar"])
-        self.assertEqual(data2["lunarMonth"], 5)
-        self.assertEqual(data2["lunarDay"], 20)
-        self.assertNotIn("date", data2)
-        self.assertEqual(data2["title"], "结婚纪念日")
-        self.assertEqual(schedule_filename(data2), "lunar-5-20")
-
-        # 带年公历
-        data3, _ = parse_anniversary("领证纪念日 2026-05-20", datetime(2026, 8, 23))
-        self.assertEqual(data3["date"], datetime(2026, 5, 20))
-
-        # 无日期报错
-        data4, err4 = parse_anniversary("结婚纪念日", datetime(2026, 8, 23))
-        self.assertIsNone(data4)
-        self.assertIn("日期", err4)
-
-        # 日期非法报错
-        data5, err5 = parse_anniversary("纪念日 13月40", datetime(2026, 8, 23))
-        self.assertIsNone(data5)
-
-    def test_build_anniversary_md(self):
-        from blog_writer_core import build_schedule_md, parse_anniversary
-
-        data, _ = parse_anniversary("我和宝宝认识的纪念日 1月1日 @宝宝", datetime(2026, 8, 23))
-        md = build_schedule_md(data)
-        # 对齐博客现有 src/content/日程/2026-01-01-我和宝宝认识的纪念日.md
-        self.assertIn('category: "anniversary"', md)
-        self.assertIn('repeat: "每年"', md)
-        self.assertIn('person: "宝宝"', md)
-        self.assertIn("date: 2026-01-01", md)
 
 
 class TestMedia(unittest.TestCase):

@@ -129,23 +129,8 @@
     "type": "list",
     "default": ["转载"]
   },
-  "bill_default_account": {
-    "description": "账单默认账户",
-    "type": "string",
-    "default": "微信"
-  },
-  "bill_default_category": {
-    "description": "账单默认分类",
-    "type": "string",
-    "default": "其他"
-  },
-  "schedule_default_priority": {
-    "description": "日程默认优先级",
-    "type": "string",
-    "default": "none"
-  },
   "schedule_remind_before": {
-    "description": "日程默认提前提醒分钟（0=准点）",
+    "description": "提醒默认提前分钟（0=准点）",
     "type": "int",
     "default": 10
   }

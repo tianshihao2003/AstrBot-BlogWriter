@@ -789,8 +789,8 @@ class TestFlow(unittest.TestCase):
         self.assertEqual(len(self.plugin._sessions), 0)
 
 
-class TestBillSchedule(unittest.TestCase):
-    """粘合层账单/日程（纯正则解析，2026-08 已移除 AI 抽取）+ 会话 + GitHub 提交"""
+class TestMediaFlow(unittest.TestCase):
+    """粘合层影视流程（TMDB 搜索 → 评分/标签/影评 → 发布）+ GitHub 提交"""
 
     def setUp(self):
         self.config = {
@@ -798,10 +798,6 @@ class TestBillSchedule(unittest.TestCase):
             "github_repo": "tianshihao2003/dumplingandcakeblog",
             "github_branch": "main",
             "allow_users": ["u1"],
-            "bill_default_account": "微信",
-            "bill_default_category": "其他",
-            "schedule_default_priority": "none",
-            "schedule_remind_before": 10,
         }
 
         import main as plugin_main
@@ -818,15 +814,11 @@ class TestBillSchedule(unittest.TestCase):
             async def _album_index(self, repo, branch, token):
                 return self.album_index_result
 
-            def _schedule_remind(self, user_id, title, remind_at, *args, **kwargs):
-                self.scheduled.append((user_id, title, remind_at))
-
             async def terminate(self):
                 pass
 
         self.plugin = Stubbed(context=types.SimpleNamespace(), config=dict(self.config))
         self.plugin.committed = []
-        self.plugin.scheduled = []
         self.plugin.last_upload_folder = None
         self.plugin.album_index_result = {"titles": {}, "files": {}}
 
@@ -843,148 +835,6 @@ class TestBillSchedule(unittest.TestCase):
         async for r in self.plugin.on_message(ev):
             out.append(r)
         return [o.text for o in out]
-
-    def test_start_bill_empty_creates_session(self):
-        replies = asyncio.get_event_loop().run_until_complete(self._send("/账单"))
-        self.assertTrue(any("账单" in r for r in replies))
-        self.assertIn("u1", self.plugin._sessions)
-        self.assertEqual(self.plugin._sessions["u1"].kind, "bill")
-
-    def test_start_bill_regex(self):
-        replies = asyncio.get_event_loop().run_until_complete(self._send("/账单 今天午餐微信花了32"))
-        self.assertTrue(any("已识别" in r or "账单" in r for r in replies))
-        sess = self.plugin._sessions.get("u1")
-        self.assertIsNotNone(sess)
-        self.assertEqual(sess.kind, "bill")
-        self.assertEqual(sess.meta.get("amount"), -32)
-        self.assertEqual(sess.meta.get("category"), "餐饮")
-        self.assertEqual(sess.meta.get("account"), "微信")
-
-    def test_start_bill_income_regex(self):
-        asyncio.get_event_loop().run_until_complete(self._send("/账单 发工资12000 银行卡"))
-        sess = self.plugin._sessions.get("u1")
-        self.assertIsNotNone(sess)
-        self.assertEqual(sess.kind, "bill")
-        self.assertEqual(sess.meta.get("type"), "income")
-        self.assertEqual(sess.meta.get("amount"), 12000)
-
-    def test_start_bill_batch_regex(self):
-        replies = asyncio.get_event_loop().run_until_complete(self._send("/账单 午餐30晚餐45打车12"))
-        sess = self.plugin._sessions.get("u1")
-        self.assertIsNotNone(sess)
-        self.assertEqual(sess.kind, "bill_batch")
-        items = sess.meta.get("items")
-        self.assertEqual(len(items), 3)
-
-    def test_start_schedule_regex(self):
-        replies = asyncio.get_event_loop().run_until_complete(self._send("/日程 明天下午3点高优在会议室A开周会 每周重复 提前15分钟"))
-        sess = self.plugin._sessions.get("u1")
-        self.assertIsNotNone(sess)
-        self.assertEqual(sess.kind, "schedule")
-        self.assertEqual(sess.meta.get("title"), "周会")
-        self.assertEqual(sess.meta.get("priority"), "high")
-        self.assertEqual(sess.meta.get("location"), "会议室A")
-
-    def test_bill_session_next_message_regex(self):
-        # 空会话后下一句口语触发正则解析
-        asyncio.get_event_loop().run_until_complete(self._send("/账单"))
-        self.assertEqual(self.plugin._sessions["u1"].kind, "bill")
-        replies = asyncio.get_event_loop().run_until_complete(self._send("今天午餐微信花了32"))
-        sess = self.plugin._sessions.get("u1")
-        self.assertIsNotNone(sess)
-        self.assertEqual(sess.meta.get("amount"), -32)
-
-    def test_schedule_session_next_message_regex(self):
-        asyncio.get_event_loop().run_until_complete(self._send("/日程"))
-        self.assertEqual(self.plugin._sessions["u1"].kind, "schedule")
-        asyncio.get_event_loop().run_until_complete(self._send("明天下午3点在会议室A开周会"))
-        sess = self.plugin._sessions.get("u1")
-        self.assertEqual(sess.kind, "schedule")
-        self.assertEqual(sess.meta.get("title"), "周会")
-
-    def test_natural_language_without_command_passthrough(self):
-        # 2026-08 移除免命令自然语言识别：无会话时口语账单/日程一律静默放行
-        replies = asyncio.get_event_loop().run_until_complete(self._send("今天午餐微信花了32"))
-        self.assertEqual(len(replies), 0)
-        self.assertNotIn("u1", self.plugin._sessions)
-        replies = asyncio.get_event_loop().run_until_complete(self._send("明天下午3点开周会"))
-        self.assertEqual(len(replies), 0)
-
-    def test_publish_bill(self):
-        asyncio.get_event_loop().run_until_complete(self._send("/账单 今天午餐微信花了32"))
-        replies = asyncio.get_event_loop().run_until_complete(self._send("/发布"))
-        self.assertTrue(any("发布成功" in r for r in replies))
-        self.assertEqual(len(self.plugin.committed), 1)
-        path, md = self.plugin.committed[0]
-        self.assertTrue(path.startswith("src/content/账单/"))
-        # 2026-08 新格式：字符串带引号、tags 行内数组
-        self.assertIn("amount: -32", md)
-        self.assertIn('category: "餐饮"', md)
-        self.assertIn('tags: ["餐饮"]', md)
-
-    def test_publish_schedule_and_remind(self):
-        asyncio.get_event_loop().run_until_complete(self._send("/日程 明天下午3点在会议室A开周会 每周重复 提前15分钟"))
-        replies = asyncio.get_event_loop().run_until_complete(self._send("/发布"))
-        self.assertTrue(any("发布成功" in r for r in replies))
-        self.assertEqual(len(self.plugin.committed), 1)
-        path, md = self.plugin.committed[0]
-        self.assertTrue(path.startswith("src/content/日程/"))
-        self.assertIn('title: "周会"', md)
-        # 含时间的日程应调度提醒
-        self.assertEqual(len(self.plugin.scheduled), 1)
-        self.assertEqual(self.plugin.scheduled[0][1], "周会")
-
-    def test_publish_schedule_batch_lunar(self):
-        # 批量农历生日：文件名 lunar-M-D 前缀、md 含 isLunar/lunarMonth/lunarDay、无 date、不调度提醒
-        replies = asyncio.get_event_loop().run_until_complete(self._send("/日程 我的生日农历8.24对象12.22妈8.7都是农历"))
-        sess = self.plugin._sessions.get("u1")
-        self.assertEqual(sess.kind, "schedule_batch")
-        self.assertEqual(len(sess.meta["items"]), 3)
-        replies = asyncio.get_event_loop().run_until_complete(self._send("/发布"))
-        self.assertTrue(any("批量发布成功" in r for r in replies))
-        self.assertEqual(len(self.plugin.committed), 3)
-        first_path, first_md = self.plugin.committed[0]
-        self.assertTrue(first_path.startswith("src/content/日程/lunar-8-24-"))
-        self.assertIn("isLunar: true", first_md)
-        self.assertIn("lunarMonth: 8", first_md)
-        self.assertIn("lunarDay: 24", first_md)
-        self.assertNotIn("date:", first_md)
-        # 全天生日不调度提醒
-        self.assertEqual(len(self.plugin.scheduled), 0)
-
-    def test_start_bill_borrow_rejected(self):
-        # 负债类型已下线：借款/欠款解析报错，不创建会话
-        replies = asyncio.get_event_loop().run_until_complete(self._send("/账单 负债 花呗借款5000"))
-        self.assertTrue(any("负债类型已下线" in r for r in replies))
-        self.assertNotIn("u1", self.plugin._sessions)
-
-    def test_start_bill_repay_keyword_as_expense(self):
-        # 自然语言「还款」→ 记为支出（分类「还款」）
-        replies = asyncio.get_event_loop().run_until_complete(self._send("/账单 花呗还款2000"))
-        sess = self.plugin._sessions.get("u1")
-        self.assertEqual(sess.meta.get("type"), "expense")
-        self.assertEqual(sess.meta.get("amount"), -2000)
-        self.assertEqual(sess.meta.get("category"), "还款")
-
-    def test_bill_session_modify_category_account(self):
-        # 识别后 /发布 前可手动改分类与账户
-        asyncio.get_event_loop().run_until_complete(self._send("/账单 理发30"))
-        sess = self.plugin._sessions.get("u1")
-        self.assertEqual(sess.meta.get("category"), "其他")
-        replies = asyncio.get_event_loop().run_until_complete(self._send("分类: 人情收礼"))
-        self.assertTrue(any("已修改分类" in r for r in replies))
-        self.assertEqual(sess.meta.get("category"), "人情收礼")
-        replies = asyncio.get_event_loop().run_until_complete(self._send("账户: 现金"))
-        self.assertTrue(any("已修改账户" in r for r in replies))
-        self.assertEqual(sess.meta.get("account"), "现金")
-        # 白名单外分类直接接受为自定义分类
-        replies = asyncio.get_event_loop().run_until_complete(self._send("分类: 水产"))
-        self.assertTrue(any("已修改分类" in r for r in replies))
-        self.assertEqual(sess.meta.get("category"), "水产")
-
-    def test_remind_command(self):
-        replies = asyncio.get_event_loop().run_until_complete(self._send("/提醒"))
-        self.assertTrue(any("提醒" in r for r in replies))
 
     def test_media_full_flow(self):
         """影视全流程：TMDB 搜索（stub）→ 评分/标签/影评 → 发布到 bangumi/anime/。"""
@@ -1282,105 +1132,14 @@ class TestBillSchedule(unittest.TestCase):
             self.plugin._download_http = orig_download
             self.plugin._list_daohang_folders = orig_folders
 
-    def test_start_birthday_single(self):
-        replies = asyncio.get_event_loop().run_until_complete(self._send("/生日 我的生日农历8.24"))
-        self.assertTrue(any("已识别生日" in r for r in replies))
-        sess = self.plugin._sessions.get("u1")
-        self.assertIsNotNone(sess)
-        self.assertEqual(sess.kind, "schedule")
-        self.assertEqual(sess.meta.get("category"), "birthday")
-        self.assertTrue(sess.meta.get("isLunar"))
-        self.assertEqual(sess.meta.get("lunarMonth"), 8)
-        self.assertEqual(sess.meta.get("lunarDay"), 24)
-        self.assertEqual(sess.meta.get("repeat"), "每年")
 
-    def test_start_birthday_batch(self):
-        replies = asyncio.get_event_loop().run_until_complete(self._send("/生日 我的农历8.24对象12.22妈8.7都是农历"))
-        sess = self.plugin._sessions.get("u1")
-        self.assertEqual(sess.kind, "schedule_batch")
-        items = sess.meta["items"]
-        self.assertEqual(len(items), 3)
-        self.assertEqual([i["person"] for i in items], ["我", "对象", "我妈"])
-        self.assertTrue(all(i.get("category") == "birthday" for i in items))
 
-    def test_birthday_session_empty_then_text(self):
-        # /生日 空会话 → 发文本解析
-        asyncio.get_event_loop().run_until_complete(self._send("/生日"))
-        self.assertEqual(self.plugin._sessions["u1"].kind, "birthday")
-        replies = asyncio.get_event_loop().run_until_complete(self._send("我的农历8.24"))
-        sess = self.plugin._sessions.get("u1")
-        self.assertEqual(sess.kind, "schedule")
-        self.assertTrue(sess.meta.get("isLunar"))
 
-    def test_publish_birthday_single_lunar(self):
-        asyncio.get_event_loop().run_until_complete(self._send("/生日 我的生日农历8.24"))
-        replies = asyncio.get_event_loop().run_until_complete(self._send("/发布"))
-        self.assertTrue(any("发布成功" in r for r in replies))
-        path, md = self.plugin.committed[0]
-        self.assertTrue(path.startswith("src/content/日程/lunar-8-24-我生日"))
-        self.assertIn('category: "birthday"', md)
-        self.assertIn("isLunar: true", md)
-        # 全天生日不调度提醒
-        self.assertEqual(len(self.plugin.scheduled), 0)
 
-    def test_start_and_publish_anniversary(self):
-        replies = asyncio.get_event_loop().run_until_complete(self._send("/纪念日 我和宝宝认识的纪念日 1月1日 @宝宝"))
-        self.assertTrue(any("已识别纪念日" in r for r in replies))
-        sess = self.plugin._sessions.get("u1")
-        self.assertEqual(sess.meta.get("category"), "anniversary")
-        self.assertEqual(sess.meta.get("person"), "宝宝")
-        self.assertEqual(sess.meta.get("repeat"), "每年")
-        replies = asyncio.get_event_loop().run_until_complete(self._send("/发布"))
-        self.assertTrue(any("发布成功" in r for r in replies))
-        path, md = self.plugin.committed[0]
-        self.assertTrue(path.startswith("src/content/日程/2026-01-01-"))
-        self.assertIn('category: "anniversary"', md)
-        self.assertIn('person: "宝宝"', md)
-        self.assertEqual(len(self.plugin.scheduled), 0)
 
-    def test_schedule_intercepts_birthday(self):
-        # 防呆：/日程 发生日内容应提示改用 /生日，不建会话
-        replies = asyncio.get_event_loop().run_until_complete(self._send("/日程 我的生日农历8.24"))
-        self.assertTrue(any("/生日" in r for r in replies))
-        self.assertNotIn("u1", self.plugin._sessions)
 
-    def test_schedule_intercepts_anniversary(self):
-        replies = asyncio.get_event_loop().run_until_complete(self._send("/日程 结婚纪念日 5月20"))
-        self.assertTrue(any("/纪念日" in r for r in replies))
-        self.assertNotIn("u1", self.plugin._sessions)
 
-    def test_schedule_normal_still_works(self):
-        # 防呆不影响普通日程
-        asyncio.get_event_loop().run_until_complete(self._send("/日程 明天下午3点高优在会议室A开周会 每周"))
-        sess = self.plugin._sessions.get("u1")
-        self.assertEqual(sess.kind, "schedule")
-        self.assertEqual(sess.meta.get("title"), "周会")
-        self.assertEqual(sess.meta.get("category", "schedule"), "schedule")
 
-    def test_bill_non_whitelist_silent(self):
-        # 白名单外用户：群聊静默；私聊发命令只回一条 ID 提示，且不建会话
-        group_ev = types.SimpleNamespace(
-            message_str="/账单 今天午餐花了10",
-            get_sender_id=lambda: "hacker",
-            get_sender_name=lambda: "黑客",
-            get_messages=lambda: [],
-            plain_result=lambda t: types.SimpleNamespace(text=t),
-            unified_msg_origin="aiocqhttp:GroupMessage:123456",
-        )
-        async def run_ev(ev):
-            out = []
-            async for r in self.plugin.on_message(ev):
-                out.append(r.text)
-            return out
-
-        replies = asyncio.get_event_loop().run_until_complete(run_ev(group_ev))
-        self.assertEqual(len(replies), 0)
-        replies = asyncio.get_event_loop().run_until_complete(
-            self._send("/账单 今天午餐花了10", sender="hacker")
-        )
-        self.assertEqual(len(replies), 1)
-        self.assertIn("hacker", replies[0])
-        self.assertNotIn("hacker", self.plugin._sessions)
 
 
 class TestReminder(unittest.TestCase):
@@ -1651,86 +1410,13 @@ class TestWizardFlow(unittest.TestCase):
         # 排序后第 1 项是 情侣头像（回归：展示与映射必须同源，防选项错位）
         self.assertEqual(sess.meta.get("name"), "情侣头像")
 
-    def test_bill_wizard_confirm_type(self):
-        replies = asyncio.get_event_loop().run_until_complete(self._send("/账单 午餐30"))
-        self.assertTrue(any("请确认类型" in r for r in replies))
-        # 选 1 支出：分类已识别（餐饮）→ 跳过分类，账户未知 → 问账户
-        replies = asyncio.get_event_loop().run_until_complete(self._send("1"))
-        self.assertTrue(any("账户" in r for r in replies))
-        replies = asyncio.get_event_loop().run_until_complete(self._send("1"))
-        self.assertTrue(any("已确认" in r for r in replies))
-        sess = self.plugin._sessions.get("u1")
-        self.assertEqual(sess.meta.get("type"), "expense")
-        self.assertEqual(sess.meta.get("category"), "餐饮")
-        self.assertEqual(sess.meta.get("account"), "微信")
 
-    def test_bill_wizard_skip_known_fields(self):
-        # 类型/分类/账户全识别 → 选 1 后直接确认，不再追问
-        replies = asyncio.get_event_loop().run_until_complete(self._send("/账单 今天午餐微信花了32"))
-        self.assertTrue(any("请确认类型" in r for r in replies))
-        replies = asyncio.get_event_loop().run_until_complete(self._send("1"))
-        self.assertTrue(any("已确认" in r for r in replies))
-        self.assertFalse(any("请选择" in r for r in replies))
 
-    def test_bill_wizard_repay_direct_confirm(self):
-        # 还款解析为支出后（分类「还款」、账户「花呗」已识别）→ 选 1 后直接确认
-        asyncio.get_event_loop().run_until_complete(self._send("/账单 花呗还款200"))
-        replies = asyncio.get_event_loop().run_until_complete(self._send("1"))
-        self.assertTrue(any("已确认" in r for r in replies))
-        sess = self.plugin._sessions.get("u1")
-        self.assertEqual(sess.meta.get("type"), "expense")
-        self.assertEqual(sess.meta.get("category"), "还款")
-        self.assertEqual(sess.meta.get("account"), "花呗")
-        self.assertEqual(sess.meta.get("amount"), -200)
 
-    def test_bill_repay_publish_single(self):
-        # 还款提交：单笔支出（分类还款、账户花呗），不再拆两笔
-        asyncio.get_event_loop().run_until_complete(self._send("/账单 花呗还款200"))
-        asyncio.get_event_loop().run_until_complete(self._send("1"))
-        replies = asyncio.get_event_loop().run_until_complete(self._send("/发布"))
-        self.assertTrue(any("发布成功" in r for r in replies))
-        self.assertEqual(len(self.plugin.committed), 1)
-        _path, md = self.plugin.committed[0]
-        self.assertIn('type: "expense"', md)
-        self.assertIn("amount: -200", md)
-        self.assertIn('category: "还款"', md)
-        self.assertIn('account: "花呗"', md)
 
-    def test_bill_empty_session_then_text_enters_wizard(self):
-        # /账单 空会话 → 补发内容 → 也应进入类型确认向导（与带参路径统一）
-        asyncio.get_event_loop().run_until_complete(self._send("/账单"))
-        replies = asyncio.get_event_loop().run_until_complete(self._send("午餐30"))
-        self.assertTrue(any("请确认类型" in r for r in replies))
-        sess = self.plugin._sessions.get("u1")
-        self.assertEqual(sess.meta.get("amount"), -30)
 
-    def test_bill_credit_purchase_now_single_expense(self):
-        # 信用购功能已移除：一句话只当普通支出解析，不再拆两笔
-        replies = asyncio.get_event_loop().run_until_complete(self._send("/账单 信用购 花呗 午餐30"))
-        self.assertTrue(any("请确认类型" in r for r in replies))
-        self.assertFalse(any("信用购已确认" in r for r in replies))
-        sess = self.plugin._sessions.get("u1")
-        self.assertEqual(sess.meta.get("type"), "expense")
-        self.assertEqual(sess.meta.get("amount"), -30)
-        self.assertEqual(sess.meta.get("account"), "花呗")
 
-    def test_bill_credit_option_removed(self):
-        # 向导选项 7 已不存在：回复 7 提示 1-4
-        asyncio.get_event_loop().run_until_complete(self._send("/账单 午餐30"))
-        replies = asyncio.get_event_loop().run_until_complete(self._send("7"))
-        self.assertTrue(any("1-4" in r for r in replies))
 
-    def test_bill_wizard_reinput(self):
-        # 选 4 重说 → 重新发内容 → 回到类型确认
-        asyncio.get_event_loop().run_until_complete(self._send("/账单 午餐30"))
-        replies = asyncio.get_event_loop().run_until_complete(self._send("4"))
-        self.assertTrue(any("重新发送账单内容" in r for r in replies))
-        replies = asyncio.get_event_loop().run_until_complete(self._send("发工资5000 银行卡"))
-        self.assertTrue(any("已重新识别" in r for r in replies))
-        self.assertTrue(any("请确认类型" in r for r in replies))
-        sess = self.plugin._sessions.get("u1")
-        self.assertEqual(sess.meta.get("type"), "income")
-        self.assertEqual(sess.meta.get("amount"), 5000)
 
     def test_media_wizard_game_publish(self):
         # 影视向导选 5 游戏 → 发布到 bangumi/game/，category game、无 subcategory
@@ -1988,7 +1674,7 @@ class TestPlatformCompat(unittest.TestCase):
 
     - allow_users 与 AstrBot 全局 admins_id（event.is_admin）双白名单
     - 非白名单用户私聊发命令 → 回一条含其 ID 的提示（可关、带冷却）；群聊与非命令仍静默
-    - 平台不支持主动推送（企业微信）时，日程发布回复里如实提示提醒可能收不到
+    - 平台能力经 platform_meta 读取（如 support_proactive_message，企业微信为 False）
     """
 
     def setUp(self):
@@ -2098,18 +1784,4 @@ class TestPlatformCompat(unittest.TestCase):
 
     # ---------- 提醒平台能力 ----------
 
-    def test_proactive_unsupported_note_on_schedule(self):
-        self._run(self._ev("/日程 明天下午3点在会议室A开周会", platform="wecom", proactive=False))
-        replies = self._run(self._ev("/发布", platform="wecom", proactive=False))
-        self.assertTrue(any("发布成功" in r for r in replies))
-        self.assertTrue(any("主动推送" in r for r in replies))
 
-    def test_proactive_supported_no_note(self):
-        self._run(self._ev("/日程 明天下午3点在会议室A开周会", platform="qq_official", proactive=True))
-        replies = self._run(self._ev("/发布", platform="qq_official", proactive=True))
-        self.assertTrue(any("发布成功" in r for r in replies))
-        self.assertFalse(any("主动推送" in r for r in replies))
-
-
-if __name__ == "__main__":
-    unittest.main()

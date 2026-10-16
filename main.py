@@ -66,10 +66,7 @@ from astrbot.api.star import Context, Star, register
 
 try:
     from .blog_writer_core import (
-        BILL_ACCOUNTS,
-        BILL_CATEGORIES,
         COMMANDS,
-        SCHEDULE_PRIORITIES,
         build_album_md,
         build_amap_url,
         build_bangumi_md,
@@ -80,14 +77,12 @@ try:
         build_daohang_md,
         build_tmdb_search_url,
         build_xxapi_ico_url,
-        build_bill_md,
         build_github_put_body,
         build_imgbed_upload,
         build_moment_md,
         build_note_md,
         build_notebook_index_json,
         build_place_md,
-        build_schedule_md,
         build_upload_url,
         build_friend_md,
         clean_filename_part,
@@ -100,13 +95,10 @@ try:
         parse_amap_response,
         parse_album,
         parse_album_frontmatter,
-        parse_anniversary,
         parse_media_score,
         parse_media_fields,
         parse_tmdb_search_response,
         parse_xxapi_ico_response,
-        parse_bill,
-        parse_bills_batch,
         parse_daohang_text,
         parse_dynamic,
         parse_friend_text,
@@ -115,10 +107,7 @@ try:
         parse_message,
         parse_note,
         parse_place,
-        parse_schedule,
-        parse_schedules_batch,
         place_filename,
-        schedule_filename,
         daohang_slug,
         site_host,
         tmdb_poster_url,
@@ -131,14 +120,10 @@ try:
         is_wizard_cancel,
         is_wizard_skip,
         MEDIA_WIZARD_CATEGORIES,
-        BILL_WIZARD_CREDIT_ACCOUNTS,
     )
 except ImportError:  # 兼容非包形式加载
     from blog_writer_core import (
-        BILL_ACCOUNTS,
-        BILL_CATEGORIES,
         COMMANDS,
-        SCHEDULE_PRIORITIES,
         build_album_md,
         build_amap_url,
         build_bangumi_md,
@@ -149,14 +134,12 @@ except ImportError:  # 兼容非包形式加载
         build_daohang_md,
         build_tmdb_search_url,
         build_xxapi_ico_url,
-        build_bill_md,
         build_github_put_body,
         build_imgbed_upload,
         build_moment_md,
         build_note_md,
         build_notebook_index_json,
         build_place_md,
-        build_schedule_md,
         build_upload_url,
         build_friend_md,
         clean_filename_part,
@@ -169,13 +152,10 @@ except ImportError:  # 兼容非包形式加载
         parse_amap_response,
         parse_album,
         parse_album_frontmatter,
-        parse_anniversary,
         parse_media_score,
         parse_media_fields,
         parse_tmdb_search_response,
         parse_xxapi_ico_response,
-        parse_bill,
-        parse_bills_batch,
         parse_daohang_text,
         parse_dynamic,
         parse_friend_text,
@@ -184,10 +164,7 @@ except ImportError:  # 兼容非包形式加载
         parse_message,
         parse_note,
         parse_place,
-        parse_schedule,
-        parse_schedules_batch,
         place_filename,
-        schedule_filename,
         daohang_slug,
         site_host,
         tmdb_poster_url,
@@ -200,7 +177,6 @@ except ImportError:  # 兼容非包形式加载
         is_wizard_cancel,
         is_wizard_skip,
         MEDIA_WIZARD_CATEGORIES,
-        BILL_WIZARD_CREDIT_ACCOUNTS,
     )
 
 CONNECT_TIMEOUT = 15
@@ -214,7 +190,7 @@ RETRY_DELAYS = (1.0, 3.0)
 @register(
     "blog_writer",
     "tianshihao2003",
-    "通过微信/QQ对话更新博客的动态、笔记、足迹、相册、友链、账单、日程（交互式向导 + 日程提醒）",
+    "通过微信/QQ对话更新博客的动态、笔记、足迹、相册、友链、影视、书籍、导航（交互式向导）",
     "v1.0.0",
 )
 class BlogWriter(Star):
@@ -711,7 +687,7 @@ class BlogWriter(Star):
                     self._scheduler.add_job(
                         self._send_remind_sync,
                         trigger=trigger,
-                        args=[user_id, f"🔔 日程提醒：{title} 时间到了", unified_msg_origin],
+                        args=[user_id, f"🔔 提醒：{title} 时间到了", unified_msg_origin],
                         id=rid,
                         replace_existing=True,
                     )
@@ -721,46 +697,6 @@ class BlogWriter(Star):
             logger.warning("BlogWriter: 调度提醒失败: %s", e)
 
     # ---------- 向导辅助 ----------
-
-    _BILL_TYPE_LABELS = {"expense": "支出", "income": "收入"}
-
-    def _bill_accounts_all(self) -> List[str]:
-        """账户全量选项：基础白名单 + 信用账户别名（账户仅是记账口径）。"""
-        return BILL_ACCOUNTS + [a for a in BILL_WIZARD_CREDIT_ACCOUNTS if a not in BILL_ACCOUNTS]
-
-    def _bill_type_prompt(self) -> str:
-        return format_choices(
-            "请确认类型：",
-            ["支出", "收入"],
-            extra=["直接发布", "重说"],
-            with_skip_cancel=False,
-        )
-
-    def _bill_next_step(self, sess: Session) -> Optional[str]:
-        """类型确认后下一步：只问缺失字段，全齐返回 None（可直接发布）。"""
-        if str(sess.meta.get("category") or "其他") == "其他":
-            return "bill_pick_category"
-        if str(sess.meta.get("account") or "其他") == "其他":
-            return "bill_pick_account"
-        return None
-
-    def _bill_step_prompt(self, step: str) -> str:
-        if step == "bill_pick_category":
-            return format_choices(
-                "请选择分类（回数字选常用分类，或直接发自定义分类名）：",
-                BILL_CATEGORIES,
-                with_skip_cancel=False,
-            )
-        return (
-            format_choices("请选择账户：", self._bill_accounts_all(), with_skip_cancel=False)
-            + "\n也可直接回复账户名"
-        )
-
-    def _bill_confirm_text(self, sess: Session) -> str:
-        """发布前确认摘要。"""
-        return "账单已确认：{} 金额{}，分类{}，账户{}。发 /发布 提交。".format(
-            sess.meta.get("title"), sess.meta.get("amount"),
-            sess.meta.get("category"), sess.meta.get("account"))
 
     async def _list_notebook_names(self, repo: str, branch: str, token: str) -> Optional[List[str]]:
         """列出 src/content/笔记本 下的一级目录名（笔记本名）。
@@ -811,155 +747,7 @@ class BlogWriter(Star):
         logger.info("BlogWriter: 已补建笔记本索引 %s", idx_path)
         return True, ""
 
-    # ---------- 会话创建（账单/日程/提醒） ----------
-
-    def _apply_bill_defaults(self, item: Dict) -> None:
-        """正则解析出的账单项应用配置默认值（账户/分类为「其他」时替换）。"""
-        if item.get("account") == "其他":
-            default_acc = self._cfg("bill_default_account", "其他")
-            if default_acc in BILL_ACCOUNTS:
-                item["account"] = default_acc
-        if item.get("category") == "其他":
-            default_cat = self._cfg("bill_default_category", "其他")
-            if default_cat in BILL_CATEGORIES:
-                item["category"] = default_cat
-
-    async def _start_bill(self, event: AstrMessageEvent, user_id: str, args: List[str], raw: str):
-        text = " ".join(args).strip()
-        if not text:
-            self._sessions[user_id] = Session("bill", {})
-            return event.plain_result(
-                "账单会话已创建，请发送账单内容，发 /发布 提交，发 /取消 放弃。\n"
-                "支出：今天午餐微信花了32（或首词「支出」显式指定）\n"
-                "收入：发工资12000 银行卡（或首词「收入」）\n"
-                "批量：午餐30晚餐45打车12"
-            )
-        # 批量正则（一句含多个金额，如“午餐30晚餐45打车12”）
-        try:
-            batch, _ = parse_bills_batch(text)
-            if batch and len(batch) > 1:
-                for item in batch:
-                    self._apply_bill_defaults(item)
-                self._sessions[user_id] = Session("bill_batch", {"items": batch})
-                titles = "、".join(f"{x['title']}{x['amount']}" for x in batch[:5])
-                more = f"等{len(batch)}笔" if len(batch) > 5 else ""
-                return event.plain_result(f"已识别 {len(batch)} 笔账单：{titles}{more}，发 /发布 批量提交，发 /取消 放弃。")
-        except Exception:
-            pass
-        # 单条正则
-        parsed, err = parse_bill(text)
-        if parsed is None:
-            return event.plain_result("账单解析失败：{}，请重发或发 /取消。".format(err))
-        self._apply_bill_defaults(parsed)
-        sess = Session("bill", parsed)
-        # 进入账单向导：让用户确认类型
-        t = parsed.get("type")
-        label = self._BILL_TYPE_LABELS.get(t, t)
-        sess.wizard = {"step": "bill_confirm_type"}
-        self._sessions[user_id] = sess
-        return event.plain_result(
-            "已识别账单：{} 金额{}（{}），分类{}，账户{}\n\n".format(
-                parsed.get("title"), parsed.get("amount"), label, parsed.get("category"), parsed.get("account")
-            )
-            + self._bill_type_prompt()
-            + f"\n\n当前猜测：{label}（选对应数字，或 3 直接发布）"
-        )
-
-    def _apply_schedule_defaults(self, item: Dict) -> None:
-        """正则解析出的日程项应用配置默认值。"""
-        if item.get("priority") == "none":
-            default_p = self._cfg("schedule_default_priority", "none")
-            if default_p in SCHEDULE_PRIORITIES:
-                item["priority"] = default_p
-        if item.get("remind_before") is None:
-            item["remind_before"] = self._cfg("schedule_remind_before", 10)
-
-    async def _start_schedule(self, event: AstrMessageEvent, user_id: str, args: List[str], raw: str):
-        text = " ".join(args).strip()
-        if not text:
-            self._sessions[user_id] = Session("schedule", {})
-            return event.plain_result("日程会话已创建，请发送日程内容（如：明天下午3点在会议室A开周会），发 /发布 提交，发 /取消 放弃。")
-        # 批量正则（一句含多个生日，如“我的生日农历8.24对象12.22妈8.7都是农历”；建议用 /生日）
-        try:
-            batch, _ = parse_schedules_batch(text)
-            if batch and len(batch) > 1:
-                for item in batch:
-                    self._apply_schedule_defaults(item)
-                self._sessions[user_id] = Session("schedule_batch", {"items": batch})
-                titles = "、".join(x["title"] for x in batch[:5])
-                more = f"等{len(batch)}条" if len(batch) > 5 else ""
-                return event.plain_result(f"已识别 {len(batch)} 条生日：{titles}{more}，发 /发布 批量提交，发 /取消 放弃。\n（提示：生日请优先用 /生日 命令）")
-        except Exception:
-            pass
-        # 防呆：生日/纪念日请用专用命令，避免 category 生成错
-        if "生日" in text or "生气" in text:
-            return event.plain_result("检测到生日内容，请用 /生日 命令添加（如：/生日 我的农历8.24，支持一句多个：/生日 我的农历8.24对象12.22妈8.7都是农历）。")
-        if "纪念日" in text:
-            return event.plain_result("检测到纪念日内容，请用 /纪念日 命令添加（如：/纪念日 我和宝宝认识的纪念日 1月1日 @宝宝，支持农历：/纪念日 结婚纪念日 农历5月20）。")
-        # 单条正则
-        parsed, err = parse_schedule(text)
-        if parsed is None:
-            return event.plain_result("日程解析失败：{}，请重发或发 /取消。".format(err))
-        self._apply_schedule_defaults(parsed)
-        self._sessions[user_id] = Session("schedule", parsed)
-        return event.plain_result(
-            "已识别日程：{} 时间{} 优先级{}。发 /发布 提交，发 /取消 放弃。".format(
-                parsed.get("title"),
-                parsed.get("date").strftime("%Y-%m-%d %H:%M:%S") if isinstance(parsed.get("date"), datetime) else parsed.get("date"),
-                parsed.get("priority"),
-            )
-        )
-
-    def _fmt_birthday(self, item: Dict) -> str:
-        """生日条目摘要：我生日（农历8月24，每年）"""
-        if item.get("isLunar"):
-            when = "农历{}月{}".format(item.get("lunarMonth"), item.get("lunarDay"))
-        else:
-            dt = item.get("date")
-            when = dt.strftime("%m月%d日") if isinstance(dt, datetime) else str(dt)
-        return "{}（{}，每年重复）".format(item.get("title"), when)
-
-    async def _start_birthday(self, event: AstrMessageEvent, user_id: str, args: List[str], raw: str):
-        """/生日 —— 专用生日命令，category 固定 birthday，杜绝文件类型生成错。"""
-        text = " ".join(args).strip()
-        if not text:
-            self._sessions[user_id] = Session("birthday", {})
-            return event.plain_result(
-                "生日会话已创建，请发送生日内容（如：我的农历8.24、宝宝的 12.22），\n"
-                "支持一句多个：我的农历8.24对象12.22妈8.7都是农历。\n"
-                "发 /发布 提交，发 /取消 放弃。"
-            )
-        items, err = parse_schedules_batch(text)
-        if not items:
-            return event.plain_result("生日解析失败：{}，请重发（示例：我的农历8.24）或发 /取消。".format(err))
-        for item in items:
-            self._apply_schedule_defaults(item)
-        if len(items) == 1:
-            self._sessions[user_id] = Session("schedule", items[0])
-            return event.plain_result("已识别生日：{}。发 /发布 提交，发 /取消 放弃。".format(self._fmt_birthday(items[0])))
-        self._sessions[user_id] = Session("schedule_batch", {"items": items})
-        titles = "、".join(x["title"] for x in items[:5])
-        more = f"等{len(items)}条" if len(items) > 5 else ""
-        return event.plain_result(f"已识别 {len(items)} 条生日：{titles}{more}，发 /发布 批量提交，发 /取消 放弃。")
-
-    async def _start_anniversary(self, event: AstrMessageEvent, user_id: str, args: List[str], raw: str):
-        """/纪念日 —— 专用纪念日命令，category 固定 anniversary、每年重复、全天。"""
-        text = " ".join(args).strip()
-        if not text:
-            self._sessions[user_id] = Session("anniversary", {})
-            return event.plain_result(
-                "纪念日会话已创建，请发送纪念日内容（格式：标题 日期 [@人物]），如：\n"
-                "我和宝宝认识的纪念日 1月1日 @宝宝\n"
-                "结婚纪念日 农历5月20\n"
-                "发 /发布 提交，发 /取消 放弃。"
-            )
-        parsed, err = parse_anniversary(text)
-        if parsed is None:
-            return event.plain_result("纪念日解析失败：{}，请重发（示例：结婚纪念日 农历5月20）或发 /取消。".format(err))
-        self._apply_schedule_defaults(parsed)
-        self._sessions[user_id] = Session("schedule", parsed)
-        when = "农历{}月{}".format(parsed.get("lunarMonth"), parsed.get("lunarDay")) if parsed.get("isLunar") else parsed.get("date").strftime("%Y-%m-%d")
-        return event.plain_result("已识别纪念日：{}（{}，每年重复）。发 /发布 提交，发 /取消 放弃。".format(parsed.get("title"), when))
+    # ---------- 会话创建 ----------
 
     async def _list_daohang_folders(self, repo: str, branch: str, token: str) -> Optional[List[str]]:
         """列出 src/content/导航 下的一级分类文件夹名。
@@ -1177,7 +965,7 @@ class BlogWriter(Star):
                             lines.append(f"- {title} 于 {at.strftime('%Y-%m-%d %H:%M:%S') if isinstance(at, datetime) else at}")
                     if len(lines) > 1:
                         return event.plain_result("\n".join(lines))
-                return event.plain_result("当前无待提醒日程（可通过 /日程 创建带时间的提醒，系统将提前通知。可用 /提醒 取消 标题关键词 取消）")
+                return event.plain_result("当前没有待提醒的事项。可用 /提醒 取消 标题关键词 取消已有提醒。")
             lines = ["提醒列表："]
             for d in mine[-10:]:
                 rb = d.get("remind_before", self._cfg('schedule_remind_before',10))
@@ -1282,18 +1070,6 @@ class BlogWriter(Star):
                 return
             if cmd == "相册":
                 yield await self._start_album(event, user_id, args)
-                return
-            if cmd == "账单":
-                yield await self._start_bill(event, user_id, args, raw)
-                return
-            if cmd == "日程":
-                yield await self._start_schedule(event, user_id, args, raw)
-                return
-            if cmd == "生日":
-                yield await self._start_birthday(event, user_id, args, raw)
-                return
-            if cmd == "纪念日":
-                yield await self._start_anniversary(event, user_id, args, raw)
                 return
             if cmd == "影视":
                 yield await self._start_media(event, user_id, args)
@@ -1449,70 +1225,6 @@ class BlogWriter(Star):
                         yield event.plain_result(
                             "相册只接收图片。请直接发图片，或发 /发布 提交、/取消 放弃。"
                         )
-                    elif session.kind in ("bill", "bill_batch"):
-                        # 手动修改：分类:餐饮 / 账户:支付宝（识别错或不识别时纠正）
-                        m_cat = re.match(r"^(?:分类|类别|category)\s*[:：]?\s*(\S{1,10})\s*$", text)
-                        m_acc = re.match(r"^(?:账户|账号|account)\s*[:：]?\s*(\S{1,10})\s*$", text)
-                        if m_cat or m_acc:
-                            if session.kind == "bill_batch":
-                                yield event.plain_result("批量账单暂不支持逐条修改，请发 /取消 后重新逐条记录。")
-                                return
-                            if m_cat:
-                                cat = m_cat.group(1)
-                                # 自定义分类：白名单外直接接受（1-10 字已在正则限制）
-                                session.meta["category"] = cat
-                                session.touch()
-                                yield event.plain_result(
-                                    "已修改分类：{}。当前账单：{} 金额{}，分类{}，账户{}。发 /发布 提交。".format(
-                                        cat, session.meta.get("title"), session.meta.get("amount"),
-                                        session.meta.get("category"), session.meta.get("account"),
-                                    )
-                                )
-                                return
-                            if m_acc:
-                                acc = m_acc.group(1)
-                                session.meta["account"] = acc
-                                session.touch()
-                                yield event.plain_result(
-                                    "已修改账户：{}。当前账单：{} 金额{}，分类{}，账户{}。发 /发布 提交。".format(
-                                        acc, session.meta.get("title"), session.meta.get("amount"),
-                                        session.meta.get("category"), session.meta.get("account"),
-                                    )
-                                )
-                                return
-                        # 空会话后下一句口语：正则解析（支持批量）
-                        try:
-                            batch, _ = parse_bills_batch(text)
-                            if batch and len(batch) > 1:
-                                for item in batch:
-                                    self._apply_bill_defaults(item)
-                                session.kind = "bill_batch"
-                                session.meta = {"items": batch}
-                                session.touch()
-                                titles = "、".join(f"{x['title']}{x['amount']}" for x in batch[:5])
-                                yield event.plain_result(f"已识别 {len(batch)} 笔账单：{titles}，发 /发布 批量提交，发 /取消 放弃。")
-                                return
-                        except Exception:
-                            pass
-                        parsed, err = parse_bill(text)
-                        if parsed:
-                            self._apply_bill_defaults(parsed)
-                            session.meta.update(parsed)
-                            session.kind = "bill"
-                            session.touch()
-                            # 与 /账单 带参路径统一：进入类型确认向导
-                            session.wizard = {"step": "bill_confirm_type"}
-                            t = parsed.get("type")
-                            label = self._BILL_TYPE_LABELS.get(t, t)
-                            yield event.plain_result(
-                                "已识别账单：{} 金额{}（{}），分类{}，账户{}\n\n".format(
-                                    parsed.get("title"), parsed.get("amount"), label,
-                                    parsed.get("category"), parsed.get("account"))
-                                + self._bill_type_prompt()
-                                + f"\n\n当前猜测：{label}（选对应数字，或 5 直接发布）"
-                            )
-                        else:
-                            yield event.plain_result("账单解析失败：{}，请重发。".format(err))
                     elif session.kind == "daohang":
                         # 导航会话：键值对（名称/描述；分类=文件夹，发「分类: xxx」可改），#标签 追加标签
                         # 先摘 #标签 再解析键值对，避免标签粘在描述里（tags 2026-09-21 起回归为可选字段）
@@ -1580,75 +1292,6 @@ class BlogWriter(Star):
                         score_hint = "，评分：{}".format(session.meta.get("score")) if session.meta.get("score") is not None else ""
                         yield event.plain_result("已记录{}{}。发 /发布 提交，发 /取消 放弃。".format(score_hint, tag_hint))
                         return
-                    elif session.kind == "birthday":
-                        # 生日会话：下一句口语走批量生日正则（支持单条与多个人物）
-                        items, err = parse_schedules_batch(text)
-                        if not items:
-                            yield event.plain_result("生日解析失败：{}，请重发（示例：我的农历8.24）。".format(err))
-                            return
-                        for item in items:
-                            self._apply_schedule_defaults(item)
-                        if len(items) == 1:
-                            session.meta.update(items[0])
-                            session.kind = "schedule"
-                        else:
-                            session.kind = "schedule_batch"
-                            session.meta = {"items": items}
-                        session.touch()
-                        titles = "、".join(x["title"] for x in items[:5])
-                        more = f"等{len(items)}条" if len(items) > 5 else ""
-                        yield event.plain_result(f"已识别生日：{titles}{more}。发 /发布 提交，发 /取消 放弃。")
-                        return
-                    elif session.kind == "anniversary":
-                        # 纪念日会话：下一句口语走纪念日正则
-                        parsed, err = parse_anniversary(text)
-                        if parsed is None:
-                            yield event.plain_result("纪念日解析失败：{}，请重发（示例：结婚纪念日 农历5月20）。".format(err))
-                            return
-                        self._apply_schedule_defaults(parsed)
-                        session.meta.update(parsed)
-                        session.kind = "schedule"
-                        session.touch()
-                        yield event.plain_result(
-                            "已识别纪念日：{}。发 /发布 提交，发 /取消 放弃。".format(parsed.get("title"))
-                        )
-                        return
-                    elif session.kind in ("schedule", "schedule_batch"):
-                        # 空会话后下一句口语：优先批量生日正则，再单条正则
-                        try:
-                            batch, _ = parse_schedules_batch(text)
-                            if batch and len(batch) > 1:
-                                for item in batch:
-                                    self._apply_schedule_defaults(item)
-                                session.kind = "schedule_batch"
-                                session.meta = {"items": batch}
-                                session.touch()
-                                titles = "、".join(x["title"] for x in batch[:5])
-                                yield event.plain_result(f"已识别 {len(batch)} 条生日：{titles}，发 /发布 批量提交，发 /取消 放弃。")
-                                return
-                        except Exception:
-                            pass
-                        # 防呆：生日/纪念日走专用命令
-                        if "生日" in text or "生气" in text:
-                            yield event.plain_result("检测到生日内容，请取消后用 /生日 命令添加（如：/生日 我的农历8.24）。")
-                            return
-                        if "纪念日" in text:
-                            yield event.plain_result("检测到纪念日内容，请取消后用 /纪念日 命令添加（如：/纪念日 结婚纪念日 农历5月20）。")
-                            return
-                        parsed, err = parse_schedule(text)
-                        if parsed:
-                            self._apply_schedule_defaults(parsed)
-                            session.meta.update(parsed)
-                            session.kind = "schedule"
-                            session.touch()
-                            yield event.plain_result(
-                                "已识别日程：{} 时间{}。发 /发布 提交，发 /取消 放弃。".format(
-                                    parsed.get("title"),
-                                    parsed.get("date").strftime("%Y-%m-%d %H:%M:%S") if isinstance(parsed.get("date"), datetime) else parsed.get("date"),
-                                )
-                            )
-                        else:
-                            yield event.plain_result("日程解析失败：{}，请重发。".format(err))
                     else:
                         session.add_text(text)
                         yield event.plain_result("内容已追加。发 /发布 提交，发 /取消 放弃。")
@@ -1875,7 +1518,7 @@ class BlogWriter(Star):
     async def _publish(self, event: AstrMessageEvent, user_id: str) -> MessageEventResult:
         session = self._session(user_id)
         if not session:
-            return event.plain_result("当前没有进行中的会话，请先发 /动态、/笔记、/足迹、/友链、/相册、/账单 或 /日程。")
+            return event.plain_result("当前没有进行中的会话，请先发 /动态、/笔记、/足迹、/友链、/相册、/影视、/书籍 或 /导航。")
         repo = self._cfg("github_repo") or "tianshihao2003/dumplingandcakeblog"
         branch = self._cfg("github_branch") or "main"
         token = (self._cfg("github_token") or "").strip()
@@ -2063,96 +1706,6 @@ class BlogWriter(Star):
                 )
                 path = "src/content/追番/{}/{}.md".format(media_dir, clean_filename_part(media_title))
                 link = "/movies-games" if media_category == "game" else "/bangumi"
-            elif session.kind == "bill":
-                if not session.meta or session.meta.get("amount") is None:
-                    return event.plain_result("账单信息不完整，请先发送账单内容（如：今天午餐微信花了32）。")
-                md = build_bill_md(session.meta, now)
-                title = str(session.meta.get("title") or "账单").strip() or "账单"
-                slug = clean_filename_part(title)
-                path = "src/content/账单/{}-{}.md".format(now.strftime("%Y-%m-%d"), slug)
-                link = "/bills/{}".format(slug)
-            elif session.kind == "bill_batch":
-                items = session.meta.get("items") or []
-                if not items:
-                    return event.plain_result("批量账单为空，无法发布。")
-                success = 0
-                fails = []
-                for item in items:
-                    try:
-                        md_item = build_bill_md(item, now)
-                        title_item = str(item.get("title") or "账单").strip() or "账单"
-                        slug_item = clean_filename_part(title_item)
-                        path_item = "src/content/账单/{}-{}.md".format(now.strftime("%Y-%m-%d"), slug_item)
-                        ok_item, final_item, err_item = await self._commit_md(path_item, md_item, now)
-                        if ok_item:
-                            success += 1
-                        else:
-                            fails.append(f"{title_item}:{err_item}")
-                    except Exception as e:
-                        fails.append(f"{item.get('title','?')}:{e}")
-                self._sessions.pop(user_id, None)
-                if fails:
-                    return event.plain_result(f"批量账单发布完成：成功{success}条，失败{len(fails)}条：{'; '.join(fails[:3])}")
-                return event.plain_result(f"批量账单发布成功 ✅ 共{success}条，已写入 bills。")
-            elif session.kind in ("schedule", "birthday", "anniversary"):
-                if not session.meta or not session.meta.get("title"):
-                    return event.plain_result("日程/生日/纪念日信息不完整，请先发送内容（如：明天下午3点在会议室A开周会 / 我的农历8.24 / 结婚纪念日 农历5月20）。")
-                md = build_schedule_md(session.meta, now)
-                title = str(session.meta.get("title") or "日程").strip() or "日程"
-                slug = clean_filename_part(title)
-                # 农历日程文件名用 lunar-M-D 前缀（对齐博客 lunar-8-24-我的生日.md 惯例）
-                path = "src/content/日程/{}-{}.md".format(schedule_filename(session.meta, now), slug)
-                link = "/schedules/{}".format(slug)
-            elif session.kind == "schedule_batch":
-                items = session.meta.get("items") or []
-                if not items:
-                    return event.plain_result("批量日程为空，无法发布。")
-                # 批量创建：逐个生成并提交
-                success = 0
-                fails = []
-                for item in items:
-                    try:
-                        md_item = build_schedule_md(item, now)
-                        title_item = str(item.get("title") or "日程").strip() or "日程"
-                        slug_item = clean_filename_part(title_item)
-                        path_item = "src/content/日程/{}-{}.md".format(schedule_filename(item, now), slug_item)
-                        ok_item, final_item, err_item = await self._commit_md(path_item, md_item, now)
-                        if ok_item:
-                            success += 1
-                            # 若为生日则无需提醒；若含时间则调度
-                            try:
-                                date_val = item.get("date")
-                                dt = date_val if isinstance(date_val, datetime) else None
-                                if isinstance(date_val, str):
-                                    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d"):
-                                        try:
-                                            dt = datetime.strptime(date_val.strip(), fmt)
-                                            break
-                                        except ValueError:
-                                            continue
-                                if dt and not item.get("allDay", True):
-                                    all_day = item.get("allDay")
-                                    if all_day is None:
-                                        all_day = dt.hour == 0 and dt.minute == 0
-                                    if not all_day:
-                                        remind_before = item.get("remind_before", self._cfg("schedule_remind_before", 10))
-                                        try:
-                                            remind_before = int(remind_before)
-                                        except Exception:
-                                            remind_before = 10
-                                        remind_at = dt - timedelta(minutes=remind_before) if remind_before > 0 else dt
-                                        origin = getattr(event, "unified_msg_origin", "") or getattr(event, "session_id", "") or user_id
-                                        self._schedule_remind(user_id, title_item, remind_at, origin, remind_before)
-                            except Exception:
-                                pass
-                        else:
-                            fails.append(f"{title_item}:{err_item}")
-                    except Exception as e:
-                        fails.append(f"{item.get('title','?')}:{e}")
-                self._sessions.pop(user_id, None)
-                if fails:
-                    return event.plain_result(f"批量发布完成：成功{success}条，失败{len(fails)}条：{'; '.join(fails[:3])}")
-                return event.plain_result(f"批量发布成功 ✅ 共{success}条，已写入 schedules。")
             else:
                 lat, lng = await self._geocode(
                     session.meta.get("province", "") + session.meta.get("city", "")
@@ -2182,60 +1735,13 @@ class BlogWriter(Star):
         if not ok:
             return event.plain_result("GitHub 提交失败：{}".format(err))
 
-        # 日程提醒：成功后若为 schedule 且含时间则调用 _schedule_remind
-        remind_note = ""
-        if session.kind in ("schedule", "birthday", "anniversary"):
-            try:
-                date_val = session.meta.get("date")
-                dt = None
-                if isinstance(date_val, datetime):
-                    dt = date_val
-                elif isinstance(date_val, str):
-                    ds = date_val.strip()
-                    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d"):
-                        try:
-                            dt = datetime.strptime(ds, fmt)
-                            break
-                        except ValueError:
-                            continue
-                if dt is not None:
-                    all_day = session.meta.get("allDay")
-                    if all_day is None:
-                        all_day = dt.hour == 0 and dt.minute == 0 and dt.second == 0
-                    if not all_day:
-                        remind_before = session.meta.get("remind_before")
-                        if remind_before is None:
-                            remind_before = self._cfg("schedule_remind_before", 10)
-                        try:
-                            remind_before = int(remind_before)
-                        except Exception:
-                            remind_before = 10
-                        remind_at = dt - timedelta(minutes=remind_before) if remind_before > 0 else dt
-                        title = str(session.meta.get("title") or "日程").strip() or "日程"
-                        origin = getattr(event, "unified_msg_origin", "") or getattr(event, "session_id", "") or user_id
-                        # AstrBot 不同版本可能用 session / unified_msg_origin
-                        try:
-                            if not origin:
-                                origin = str(getattr(event, "unified_msg_origin", "") or getattr(event, "session", "") or user_id)
-                        except Exception:
-                            origin = user_id
-                        self._schedule_remind(user_id, title, remind_at, origin, remind_before)
-                        # 平台不支持主动推送（如企业微信客服/应用）：到点提醒送不到，如实提示
-                        if not self._proactive_supported(event):
-                            remind_note = (
-                                "\n\n⚠ 当前平台（{}）不支持主动推送，到点提醒可能收不到；"
-                                "需要提醒的日程建议在 QQ / 微信 上创建。".format(self._platform_label(event))
-                            )
-            except Exception as e:
-                logger.warning("BlogWriter: 调度提醒异常: %s", e)
-
         self._sessions.pop(user_id, None)
         created_hint = "\n🎉 已新建笔记本「{}」（含 _index.json）".format(
             clean_filename_part(session.meta.get("note_dir") or "日常随笔", fallback="日常随笔")
         ) if session.kind == "note" and index_created else ""
         return event.plain_result(
-            "发布成功 ✅\n\n文件：{}\n博客：https://blog.tsh520.cn{}{}{}".format(
-                final_path, link, created_hint, remind_note
+            "发布成功 ✅\n\n文件：{}\n博客：https://blog.tsh520.cn{}{}".format(
+                final_path, link, created_hint
             )
         )
 
@@ -2869,101 +2375,6 @@ class BlogWriter(Star):
             tag_hint = f"标签：{' '.join('#'+t for t in sess.meta.get('tags',[]))}" if sess.meta.get("tags") else "无标签"
             return event.plain_result(f"已记录，{tag_hint}。发 /发布 提交，或继续发影评。")
 
-        # ---- 账单向导 ----
-        if step == "bill_confirm_type":
-            # 兼容旧路径：会话内发 "分类:xxx / 账户:xxx" 直接修改（向导中也放行）
-            m_cat_early = re.match(r"^(?:分类|类别|category)\s*[:：]?\s*(\S{1,10})\s*$", text)
-            m_acc_early = re.match(r"^(?:账户|账号|account)\s*[:：]?\s*(\S{1,10})\s*$", text)
-            if m_cat_early:
-                cat = m_cat_early.group(1)
-                # 自定义分类：白名单外直接接受（1-10 字已在正则限制）
-                sess.meta["category"] = cat
-                sess.touch()
-                return event.plain_result("已修改分类：{}。当前账单：{} 金额{}，分类{}，账户{}。发 /发布 提交。".format(
-                    cat, sess.meta.get("title"), sess.meta.get("amount"), sess.meta.get("category"), sess.meta.get("account")))
-            if m_acc_early:
-                acc = m_acc_early.group(1)
-                sess.meta["account"] = acc
-                sess.touch()
-                return event.plain_result("已修改账户：{}。当前账单：{} 金额{}，分类{}，账户{}。发 /发布 提交。".format(
-                    acc, sess.meta.get("title"), sess.meta.get("amount"), sess.meta.get("category"), sess.meta.get("account")))
-            choice = parse_choice(text, 4)
-            if choice is not None:
-                if choice == 3:  # 直接发布
-                    sess.wizard = None
-                    sess.touch()
-                    return event.plain_result(self._bill_confirm_text(sess))
-                if choice == 4:  # 重说
-                    sess.wizard = {"step": "bill_reinput"}
-                    sess.touch()
-                    return event.plain_result("请重新发送账单内容（如：午餐30 / 发工资5000），发“取消”退出。")
-                mapping = {1: "expense", 2: "income"}
-                picked = mapping.get(choice)
-                if picked == "expense":
-                    sess.meta["type"] = "expense"
-                    sess.meta["amount"] = -abs(sess.meta.get("amount", 0))
-                elif picked == "income":
-                    sess.meta["type"] = "income"
-                    sess.meta["amount"] = abs(sess.meta.get("amount", 0))
-                # 后续步骤：已识别的字段直接跳过，只问缺失的
-                nxt = self._bill_next_step(sess)
-                if nxt is None:
-                    sess.wizard = None
-                    sess.touch()
-                    return event.plain_result(self._bill_confirm_text(sess))
-                sess.wizard = {"step": nxt}
-                sess.touch()
-                return event.plain_result(self._bill_step_prompt(nxt))
-            return event.plain_result("请回复数字 1-4 选择：\n" + self._bill_type_prompt())
-
-        if step == "bill_reinput":
-            parsed, err = parse_bill(text)
-            if parsed is None:
-                return event.plain_result("账单解析失败：{}，请重发或发“取消”。".format(err))
-            sess.meta.update(parsed)
-            self._apply_bill_defaults(parsed)
-            sess.touch()
-            sess.wizard = {"step": "bill_confirm_type"}
-            return event.plain_result(
-                "已重新识别：{} 金额{}，分类{}，账户{}\n\n".format(
-                    parsed.get("title"), parsed.get("amount"), parsed.get("category"), parsed.get("account"))
-                + self._bill_type_prompt()
-            )
-
-        if step == "bill_pick_category":
-            choice = parse_choice(text, len(BILL_CATEGORIES))
-            if choice is not None:
-                sess.meta["category"] = BILL_CATEGORIES[choice - 1]
-            elif text and 1 <= len(text.strip()) <= 10:
-                # 白名单外直接接受为自定义分类（如「水产」「鱼」）
-                sess.meta["category"] = text.strip()
-            else:
-                return event.plain_result(
-                    "请回复数字选常用分类，或直接发自定义分类名（1-10 字）：\n"
-                    + format_choices("请选择分类：", BILL_CATEGORIES, with_skip_cancel=False)
-                )
-            nxt = self._bill_next_step(sess)
-            if nxt is None:
-                sess.wizard = None
-                sess.touch()
-                return event.plain_result(self._bill_confirm_text(sess))
-            sess.wizard = {"step": nxt}
-            sess.touch()
-            return event.plain_result(self._bill_step_prompt(nxt))
-
-        if step == "bill_pick_account":
-            all_accounts = self._bill_accounts_all()
-            choice = parse_choice(text, len(all_accounts))
-            if choice is not None:
-                sess.meta["account"] = all_accounts[choice - 1]
-            elif text and 1 <= len(text.strip()) <= 10:
-                sess.meta["account"] = text.strip()
-            else:
-                return event.plain_result("请回复数字选择账户，或直接发账户名：\n" + format_choices("请选择账户：", all_accounts, with_skip_cancel=False))
-            sess.wizard = None
-            sess.touch()
-            return event.plain_result(self._bill_confirm_text(sess))
-
         # ---- 导航向导（分类=文件夹，2026-09-21 对齐博客） ----
         if step == "daohang_pick_category":
             folders = sess.wizard.get("folders", [])
@@ -3040,14 +2451,6 @@ class BlogWriter(Star):
             "　空参会列出相册让你选或新建\n"
             "\n"
             "———— 💰 记生活 ————\n"
-            "/账单 午餐微信花了32\n"
-            "　确认类型后发布；分类账户已识别则免问\n"
-            "/日程 明天3点在A开会 每周\n"
-            "　支持优先级、提前15分钟提醒\n"
-            "/生日 我的农历8.24\n"
-            "　可一句多人：我的8.24对象12.22\n"
-            "/纪念日 结婚纪念日 农历5.20\n"
-            "　格式：标题 日期 @人物\n"
             "/影视 侏罗纪世界\n"
             "　封面自动从 TMDB 获取\n"
             "　搜不到会让你选类型/评分/标签\n"
