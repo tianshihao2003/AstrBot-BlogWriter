@@ -792,7 +792,7 @@ class TestBillSchedule(unittest.TestCase):
 
         data, _ = parse_anniversary("我和宝宝认识的纪念日 1月1日 @宝宝", datetime(2026, 8, 23))
         md = build_schedule_md(data)
-        # 对齐博客现有 src/content/schedules/2026-01-01-我和宝宝认识的纪念日.md
+        # 对齐博客现有 src/content/日程/2026-01-01-我和宝宝认识的纪念日.md
         self.assertIn('category: "anniversary"', md)
         self.assertIn('repeat: "每年"', md)
         self.assertIn('person: "宝宝"', md)
@@ -868,7 +868,7 @@ class TestMedia(unittest.TestCase):
             subcategory="movie",
             now=datetime(2026, 8, 23),
         )
-        # 对齐博客现有 src/content/bangumi/anime/侏罗纪世界.md 格式
+        # 对齐博客现有 src/content/追番/anime/侏罗纪世界.md 格式
         self.assertIn("title: 侏罗纪世界", md)
         self.assertIn("category: anime", md)
         self.assertIn("subcategory: movie", md)
@@ -967,7 +967,7 @@ class TestDaohang(unittest.TestCase):
     def test_build_daohang_md_tags(self):
         from blog_writer_core import build_daohang_md
 
-        # tags 2026-09-21 起回归为可选字段，块状列表（与 src/content/daohang 下现有条目一致）
+        # tags 2026-09-21 起回归为可选字段，块状列表（与 src/content/导航 下现有条目一致）
         md = build_daohang_md(
             "站点X",
             "https://x.cn",

@@ -763,11 +763,11 @@ class BlogWriter(Star):
             sess.meta.get("category"), sess.meta.get("account"))
 
     async def _list_notebook_names(self, repo: str, branch: str, token: str) -> Optional[List[str]]:
-        """列出 src/content/life/notebooks 下的一级目录名（笔记本名）。
+        """列出 src/content/笔记本 下的一级目录名（笔记本名）。
 
         返回排序后的目录名列表；**请求失败返回 None**（区别于空仓库的 []，
         发布笔记时依赖该区分决定是否补建 _index.json）。"""
-        url = "https://api.github.com/repos/{}/contents/src/content/life/notebooks?ref={}".format(
+        url = "https://api.github.com/repos/{}/contents/src/content/笔记本?ref={}".format(
             repo, urllib.parse.quote(branch)
         )
         headers = {
@@ -800,7 +800,7 @@ class BlogWriter(Star):
         names = await self._list_notebook_names(repo, branch, token)
         if names is None or note_dir in names:
             return False, ""
-        idx_path = "src/content/life/notebooks/{}/_index.json".format(note_dir)
+        idx_path = "src/content/笔记本/{}/_index.json".format(note_dir)
         exists = await self._github_exists(repo, idx_path, branch, token)
         if exists is not False:  # True（已存在）或 None（查询失败）都不再建
             return False, ""
@@ -962,11 +962,11 @@ class BlogWriter(Star):
         return event.plain_result("已识别纪念日：{}（{}，每年重复）。发 /发布 提交，发 /取消 放弃。".format(parsed.get("title"), when))
 
     async def _list_daohang_folders(self, repo: str, branch: str, token: str) -> Optional[List[str]]:
-        """列出 src/content/daohang 下的一级分类文件夹名。
+        """列出 src/content/导航 下的一级分类文件夹名。
 
         返回排序后的文件夹名列表；请求失败返回 None（区别于空目录的 []）。
         """
-        url = "https://api.github.com/repos/{}/contents/src/content/daohang?ref={}".format(
+        url = "https://api.github.com/repos/{}/contents/src/content/导航?ref={}".format(
             repo, urllib.parse.quote(branch)
         )
         headers = {
@@ -993,7 +993,7 @@ class BlogWriter(Star):
 
     async def _start_daohang(self, event: AstrMessageEvent, user_id: str, args: List[str]):
         """/导航 网址 —— xxapi 取网站图标，向导选分类文件夹（2026-09-21 起分类=文件夹），
-        键值对补名称/描述、#标签 补标签；/发布 上传图标到 blog/daohang 并提交 src/content/daohang/<分类>/。"""
+        键值对补名称/描述、#标签 补标签；/发布 上传图标到 blog/daohang 并提交 src/content/导航/<分类>/。"""
         url = " ".join(args).strip()
         if not url:
             return event.plain_result("格式：/导航 网址（如：/导航 https://example.com），图标自动获取。")
@@ -1860,11 +1860,11 @@ class BlogWriter(Star):
         )
         article_dir = clean_filename_part(self._cfg("article_default_dir") or "技术分享", fallback="技术分享")
         file_name = clean_filename_part(data["title"], fallback="转载文章")
-        path = "src/content/posts/{}/{}.md".format(article_dir, file_name)
+        path = "src/content/文章/{}/{}.md".format(article_dir, file_name)
         ok, final_path, err2 = await self._commit_md(path, md, now)
         if not ok:
             return event.plain_result("转载提交失败：{}".format(err2))
-        slug = final_path[len("src/content/posts/"):-len(".md")]
+        slug = final_path[len("src/content/文章/"):-len(".md")]
         return event.plain_result(
             "转载成功 ✅\n\n标题：{}\n公众号：{}\n文件：{}\n博客：https://blog.tsh520.cn/posts/{}".format(
                 data["title"], data["author"] or "未知", final_path, slug)
@@ -1948,7 +1948,7 @@ class BlogWriter(Star):
                     self._merge_tags(self._cfg("moment_tags", ["日常"]), session.meta.get("tags")),
                     now,
                 )
-                path = "src/content/moments/{}.md".format(moment_filename(now))
+                path = "src/content/动态/{}.md".format(moment_filename(now))
                 link = "/moments/{}".format(moment_filename(now))
             elif session.kind == "note":
                 md = build_note_md(
@@ -1964,11 +1964,11 @@ class BlogWriter(Star):
                 if not ok_idx and err_idx:
                     return event.plain_result("新笔记本 _index.json 创建失败：{}，已中止发布（避免出现不可见笔记）。".format(err_idx))
                 index_created = ok_idx
-                path = "src/content/life/notebooks/{}/{}.md".format(note_dir, note_filename(now))
-                link = "/life/notebooks/{}/{}".format(note_dir, note_filename(now))
+                path = "src/content/笔记本/{}/{}.md".format(note_dir, note_filename(now))
+                link = "/笔记本/{}/{}".format(note_dir, note_filename(now))
             elif session.kind == "friend":
                 friend_index = await self._github_list_dir_index(
-                    "src/content/friends", repo, branch, token
+                    "src/content/友链", repo, branch, token
                 )
                 title = session.meta.get("title", "").strip()
                 md = build_friend_md(
@@ -1979,7 +1979,7 @@ class BlogWriter(Star):
                     or (self._cfg("friend_default_avatar") or "/assets/ziyuan/tx.webp"),
                     self._cfg("friend_tags") or ["Blog"],
                 )
-                path = "src/content/friends/{:02d}-{}.md".format(
+                path = "src/content/友链/{:02d}-{}.md".format(
                     friend_index, clean_filename_part(title)
                 )
                 link = "/friends"
@@ -1996,7 +1996,7 @@ class BlogWriter(Star):
                         )
                     )
                 md = build_album_md(album_name, album_folder, now)
-                path = "src/content/album/{}.md".format(clean_name)
+                path = "src/content/相册/{}.md".format(clean_name)
                 link = "/album/{}".format(clean_name)
             elif session.kind == "daohang":
                 # 导航条目（2026-09-21 对齐博客）：分类=文件夹，
@@ -2014,7 +2014,7 @@ class BlogWriter(Star):
                     body=session.full_text(),
                     tags=session.meta.get("tags") or [],
                 )
-                path = "src/content/daohang/{}/{}.md".format(
+                path = "src/content/导航/{}/{}.md".format(
                     daohang_cat, daohang_slug(session.meta.get("url", ""))
                 )
                 link = "/projects"
@@ -2032,7 +2032,7 @@ class BlogWriter(Star):
                     category="book",
                     now=now,
                 )
-                path = "src/content/bangumi/book/{}.md".format(clean_filename_part(book_title))
+                path = "src/content/追番/book/{}.md".format(clean_filename_part(book_title))
                 link = "/books"
             elif session.kind == "media":
                 # 影视/游戏条目：category 由向导决定（anime/game），落盘目录随之分流
@@ -2061,7 +2061,7 @@ class BlogWriter(Star):
                     category=media_category,
                     now=now,
                 )
-                path = "src/content/bangumi/{}/{}.md".format(media_dir, clean_filename_part(media_title))
+                path = "src/content/追番/{}/{}.md".format(media_dir, clean_filename_part(media_title))
                 link = "/movies-games" if media_category == "game" else "/bangumi"
             elif session.kind == "bill":
                 if not session.meta or session.meta.get("amount") is None:
@@ -2069,7 +2069,7 @@ class BlogWriter(Star):
                 md = build_bill_md(session.meta, now)
                 title = str(session.meta.get("title") or "账单").strip() or "账单"
                 slug = clean_filename_part(title)
-                path = "src/content/bills/{}-{}.md".format(now.strftime("%Y-%m-%d"), slug)
+                path = "src/content/账单/{}-{}.md".format(now.strftime("%Y-%m-%d"), slug)
                 link = "/bills/{}".format(slug)
             elif session.kind == "bill_batch":
                 items = session.meta.get("items") or []
@@ -2082,7 +2082,7 @@ class BlogWriter(Star):
                         md_item = build_bill_md(item, now)
                         title_item = str(item.get("title") or "账单").strip() or "账单"
                         slug_item = clean_filename_part(title_item)
-                        path_item = "src/content/bills/{}-{}.md".format(now.strftime("%Y-%m-%d"), slug_item)
+                        path_item = "src/content/账单/{}-{}.md".format(now.strftime("%Y-%m-%d"), slug_item)
                         ok_item, final_item, err_item = await self._commit_md(path_item, md_item, now)
                         if ok_item:
                             success += 1
@@ -2101,7 +2101,7 @@ class BlogWriter(Star):
                 title = str(session.meta.get("title") or "日程").strip() or "日程"
                 slug = clean_filename_part(title)
                 # 农历日程文件名用 lunar-M-D 前缀（对齐博客 lunar-8-24-我的生日.md 惯例）
-                path = "src/content/schedules/{}-{}.md".format(schedule_filename(session.meta, now), slug)
+                path = "src/content/日程/{}-{}.md".format(schedule_filename(session.meta, now), slug)
                 link = "/schedules/{}".format(slug)
             elif session.kind == "schedule_batch":
                 items = session.meta.get("items") or []
@@ -2115,7 +2115,7 @@ class BlogWriter(Star):
                         md_item = build_schedule_md(item, now)
                         title_item = str(item.get("title") or "日程").strip() or "日程"
                         slug_item = clean_filename_part(title_item)
-                        path_item = "src/content/schedules/{}-{}.md".format(schedule_filename(item, now), slug_item)
+                        path_item = "src/content/日程/{}-{}.md".format(schedule_filename(item, now), slug_item)
                         ok_item, final_item, err_item = await self._commit_md(path_item, md_item, now)
                         if ok_item:
                             success += 1
@@ -2171,8 +2171,8 @@ class BlogWriter(Star):
                     self._merge_tags(self._cfg("place_tags", ["旅游"]), session.meta.get("tags")),
                     now,
                 )
-                path = "src/content/life/places/{}.md".format(place_filename(now))
-                link = "/life/places/{}".format(place_filename(now))
+                path = "src/content/地点/{}.md".format(place_filename(now))
+                link = "/地点/{}".format(place_filename(now))
         except Exception as e:
             logger.error("BlogWriter 生成 markdown 失败: {}".format(e))
             return event.plain_result("生成内容失败：{}".format(e))
@@ -2483,7 +2483,7 @@ class BlogWriter(Star):
         return None
 
     async def _album_index(self, repo: str, branch: str, token: str) -> Optional[Dict[str, object]]:
-        """列出 src/content/album 目录并解析每个文件的 title/imgbedFolder。
+        """列出 src/content/相册 目录并解析每个文件的 title/imgbedFolder。
 
         返回 {"titles": {title: folder}, "files": {文件名: folder},
               "entries": [(title, 文件名, folder), ...]}（entries 供向导一次性展示，避免二次拉取）；
@@ -2491,7 +2491,7 @@ class BlogWriter(Star):
         """
         import json as _json
 
-        url = "https://api.github.com/repos/{}/contents/src/content/album?ref={}".format(
+        url = "https://api.github.com/repos/{}/contents/src/content/相册?ref={}".format(
             repo, urllib.parse.quote(branch)
         )
         headers = {
@@ -2517,7 +2517,7 @@ class BlogWriter(Star):
                 if not name.lower().endswith((".md", ".mdx")):
                     continue
                 content = await self._github_file_content(
-                    repo, "src/content/album/" + name, branch, token
+                    repo, "src/content/相册/" + name, branch, token
                 )
                 if content is None:
                     continue

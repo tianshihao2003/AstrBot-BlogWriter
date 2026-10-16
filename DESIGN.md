@@ -50,7 +50,7 @@
 
 ## 4. 文件生成规则（对齐现有数据）
 
-### 动态 → `src/content/moments/YYYY-MM-DD[-N].md`
+### 动态 → `src/content/动态/YYYY-MM-DD[-N].md`
 
 ```yaml
 ---
@@ -66,7 +66,7 @@ images:
 
 > 2026-08-13 起不再写 `author`/`avatar`（博客 schema 已提供默认值 `团子和蛋糕`、`/assets/ziyuan/tx.webp`）。图片放 frontmatter `images` 数组，正文只放文字。
 
-### 笔记 → `src/content/life/notebooks/<分类>/2026年8月8日[-N].md`
+### 笔记 → `src/content/笔记本/<分类>/2026年8月8日[-N].md`
 
 ```yaml
 ---
@@ -79,7 +79,7 @@ name: 标题
 
 分类来自 `/笔记` 第一个参数；默认 `日常随笔`（配置 default_note_dir）。
 
-### 足迹 → `src/content/life/places/YYYY-MM-DD[-N].md`
+### 足迹 → `src/content/地点/YYYY-MM-DD[-N].md`
 
 ```yaml
 ---
@@ -100,7 +100,7 @@ tags:
 
 lat/lng 由高德 geocode（address = 省+地点）获取；解析失败则中止发布并报错（绝不发布无坐标足迹）。
 
-### 相册 → `src/content/album/<相册名>.md`
+### 相册 → `src/content/相册/<相册名>.md`
 
 ```yaml
 ---
@@ -111,7 +111,7 @@ imgbedFolder: blog/album/情侣头像
 ```
 
 - 照片不进 md：上传到图床目录，博客详情页运行时动态拉图（对齐 2026-08-13 博客相册全量图床化惯例）
-- **存在性判断**：列出 `src/content/album/` 并解析每个文件的 title/imgbedFolder；`title == 相册名` 或存在 `<相册名>.md` → 追加模式，照片上传到**命中相册自己的 imgbedFolder**（如「测试相册」→ `blog/album/相册1`）；否则新建（文件名 = 清洗后的相册名，不生成 `-1` 后缀）
+- **存在性判断**：列出 `src/content/相册/` 并解析每个文件的 title/imgbedFolder；`title == 相册名` 或存在 `<相册名>.md` → 追加模式，照片上传到**命中相册自己的 imgbedFolder**（如「测试相册」→ `blog/album/相册1`）；否则新建（文件名 = 清洗后的相册名，不生成 `-1` 后缀）
 - 追加模式只传图、不写文件、不触发构建（详情页即时可见，列表页预览下次构建后刷新）
 - 相册会话只收图片，收到文字仅提示；无图片时拒绝发布
 

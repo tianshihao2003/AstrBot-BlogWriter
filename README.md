@@ -17,16 +17,16 @@
 - ✅ **日程细分三命令**（2026-08-23）：`/日程` 普通日程（如 `明天下午3点高优在会议室A开周会 每周 提前15分钟`）、`/生日` 生日（category: birthday，支持一句多人+农历，农历按 `isLunar/lunarMonth/lunarDay` 存储、文件名 `lunar-M-D` 前缀）、`/纪念日` 纪念日（category: anniversary，每年重复，支持 `@人物`）；用错命令会自动提示纠正，杜绝 category 生成错
 - ✅ **日程微信提醒**：到点前 `N` 分钟（可口语“提前15分钟”或设置默认）微信私聊 `🔔 提醒`，`apscheduler` 持久化，重启不丢，支持 `/提醒 列表/取消`
 - ✅ 动态支持图片、动图 GIF 与视频：微信视频自动下载、上传图床，URL 进动态 `images` 数组（视频仅动态支持）
-- ✅ 相册发布：新相册自动建 `src/content/album/<名>.md`（含 `subtitle`/`imgbedFolder`，对齐博客现有格式）触发构建；已有相册（按标题/文件名判断）只传图不写文件，照片进命中相册自己的图床目录
+- ✅ 相册发布：新相册自动建 `src/content/相册/<名>.md`（含 `subtitle`/`imgbedFolder`，对齐博客现有格式）触发构建；已有相册（按标题/文件名判断）只传图不写文件，照片进命中相册自己的图床目录
 - ✅ 图片自动上传图床（统一上传到 `imgbed_upload_folder`，默认 `blog/moments`，与博客图床目录惯例一致）
 - ✅ 足迹坐标自动获取（高德地理编码 API）；足迹格式对齐博客最新（含 `description` 固定句式）
 - ✅ 自定义标签：`/动态 内容 #日常 #2026`，自动合并默认标签（纯数字标签自动加引号防 schema 校验失败）
 - ✅ 友链字段智能识别：兼容中英文键名（站点名称/名称/name/博客名…）、冒号/单空格分隔、乱序、缺字段提示；`weight: 0` + `group: other` 对齐现有文件
 - ✅ 会话式图片收集：微信图片不能图文同发，先发命令再发图，`/发布` 统一提交
 - ✅ 文件名自动冲突处理：同日多条自动追加 `-1`、`-2` 后缀
-- ✅ **影视记录**（2026-08-23）：`/影视 侏罗纪世界` 自动从 TMDB 搜索中文片名并获取封面，封面上传图床独立目录（默认 `blog/bangumi`）；随后可发 `评分 8`、`#标签`、一句话影评，生成 `src/content/bangumi/anime/片名.md`（category: anime + subcategory: movie/tv）；**自己发图可替换封面**；TMDB 搜不到自动转手动模式（自己发图 + `名称:`/`类型:` 修正）；TMDB 连不上可在配置填反代地址
-- ✅ **书籍记录**（2026-08-23）：`/书籍 书名` 自己发封面图（必须），评分/标签/书评同影视，生成 `src/content/bangumi/book/书名.md`（category: book）
-- ✅ **导航网站**（2026-08-23，2026-09-21 对齐博客新格式）：`/导航 https://example.com` 自动通过 xxapi（v2.xxapi.cn，无需 Key）获取网站图标，图标上传图床独立目录（默认 `blog/daohang`）；向导从博客现有分类文件夹里选（或新建/回复分类名，缺省 `daohang_default_category`）；随后键值对补 `名称/描述` + `#标签`，生成 `src/content/daohang/<分类>/域名-slug.md`（分类=文件夹，条目只写 `name/url/icon/description/tags`）
+- ✅ **影视记录**（2026-08-23）：`/影视 侏罗纪世界` 自动从 TMDB 搜索中文片名并获取封面，封面上传图床独立目录（默认 `blog/bangumi`）；随后可发 `评分 8`、`#标签`、一句话影评，生成 `src/content/追番/anime/片名.md`（category: anime + subcategory: movie/tv）；**自己发图可替换封面**；TMDB 搜不到自动转手动模式（自己发图 + `名称:`/`类型:` 修正）；TMDB 连不上可在配置填反代地址
+- ✅ **书籍记录**（2026-08-23）：`/书籍 书名` 自己发封面图（必须），评分/标签/书评同影视，生成 `src/content/追番/book/书名.md`（category: book）
+- ✅ **导航网站**（2026-08-23，2026-09-21 对齐博客新格式）：`/导航 https://example.com` 自动通过 xxapi（v2.xxapi.cn，无需 Key）获取网站图标，图标上传图床独立目录（默认 `blog/daohang`）；向导从博客现有分类文件夹里选（或新建/回复分类名，缺省 `daohang_default_category`）；随后键值对补 `名称/描述` + `#标签`，生成 `src/content/导航/<分类>/域名-slug.md`（分类=文件夹，条目只写 `name/url/icon/description/tags`）
 - ✅ 白名单控制：非白名单用户静默忽略（私聊发命令只回一条含其 ID 的提示，见「平台支持」），绝不抢占其他插件/AI 的消息处理
 - ✅ 微信图片下载兜底：适配器 aiohttp 被微信 CDN TLS 风控拒绝时，自动改用 curl 下载 + AES 解密
 
@@ -91,7 +91,7 @@
 | `/纪念日 结婚纪念日 农历5月20` / `/纪念日` | 纪念日（category: anniversary，每年重复全天），格式 `标题 日期 [@人物]`，日期支持 `1月1日` / `2026-01-01` / `农历5月20` |
 | `/影视 侏罗纪世界` | TMDB 自动搜片取封面（上传图床 `blog/bangumi`）；搜不到转手动模式：发封面图后**向导选类型**（1.电影 2.电视剧 3.动漫 4.纪录片 5.游戏）→ 评分 → 标签；游戏落 `bangumi/game/`、动漫/纪录片写对应 subcategory |
 | `/书籍 认知觉醒` | 书籍记录：自己发封面图（必须），评分/标签/书评同影视，生成 bangumi/book 条目 |
-| `/导航 https://example.com` | 添加导航网站：xxapi 自动取图标（上传图床 `blog/daohang`），**向导选分类文件夹**（列出现有分类，可选新建），随后发键值对 `名称/描述` 与 `#标签`，`/发布` 生成 `src/content/daohang/<分类>/` 条目（`name/url/icon/description/tags`，对齐博客 2026-09-21） |
+| `/导航 https://example.com` | 添加导航网站：xxapi 自动取图标（上传图床 `blog/daohang`），**向导选分类文件夹**（列出现有分类，可选新建），随后发键值对 `名称/描述` 与 `#标签`，`/发布` 生成 `src/content/导航/<分类>/` 条目（`name/url/icon/description/tags`，对齐博客 2026-09-21） |
 | `/转载 https://mp.weixin.qq.com/s/xxxx` | 公众号文章转载：抓取正文转 Markdown、图片转存图床（默认 `blog/article`），生成博客文章（sourceLink + 转载声明）到配置目录（默认 `技术分享`），一次命令直达发布 |
 | `/提醒 列表` / `/提醒 取消 标题` | 查看/取消待提醒日程 |
 | `/发布` | 结束会话：上传图床 → 生成 markdown → GitHub 提交 |

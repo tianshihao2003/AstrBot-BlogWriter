@@ -285,7 +285,7 @@ def build_place_md(
     tags: List[str],
     day: datetime = None,
 ) -> str:
-    """对齐博客最新足迹格式（2026-08-22 参照 src/content/life/places/）：
+    """对齐博客最新足迹格式（2026-08-22 参照 src/content/地点/）：
     新增 description 固定句式、不再写 visitCount（schema 默认 1）、
     字符串带引号、tags 行内数组、photos 多行带引号。
     """
@@ -738,7 +738,7 @@ def build_daohang_md(
     """生成导航条目 md，对齐博客最新格式（2026-09-21 v1.40.3 + tags 回归）：
     条目写 name/url + 可选 icon/description/tags（category 由文件夹决定，
     color/featured/order/image 已从 schema 删除，不再写入）。
-    tags 非空时按块状列表输出（与 src/content/daohang 下现有条目一致）：
+    tags 非空时按块状列表输出（与 src/content/导航 下现有条目一致）：
         tags:
           - API
     """

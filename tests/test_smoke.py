@@ -198,7 +198,7 @@ class TestFlow(unittest.TestCase):
         self.assertIn("发布成功", replies[0])
         self.assertEqual(len(self.plugin.committed), 1)
         path, md = self.plugin.committed[0]
-        self.assertTrue(path.startswith("src/content/moments/"))
+        self.assertTrue(path.startswith("src/content/动态/"))
         self.assertIn("今天去了公园", md)
         self.assertIn("blogwriter_test.png", md)  # 图片进 frontmatter images 数组
         self.assertNotIn("id: ext-", md)
@@ -216,7 +216,7 @@ class TestFlow(unittest.TestCase):
         replies = asyncio.get_event_loop().run_until_complete(self._send("/发布"))
         self.assertIn("发布成功", replies[0])
         path, md = self.plugin.committed[0]
-        self.assertTrue(path.startswith("src/content/life/notebooks/日常随笔/"))
+        self.assertTrue(path.startswith("src/content/笔记本/日常随笔/"))
         self.assertIn("name: 标题", md)
         self.assertIn("第一段正文\n第二段正文", md)
 
@@ -404,7 +404,7 @@ class TestFlow(unittest.TestCase):
         replies = asyncio.get_event_loop().run_until_complete(self._send("/发布"))
         self.assertIn("发布成功", replies[0])
         path, md = self.plugin.committed[0]
-        self.assertEqual(path, "src/content/friends/06-测试友链.md")
+        self.assertEqual(path, "src/content/友链/06-测试友链.md")
         self.assertIn("title: 测试友链", md)
         self.assertIn("siteurl: https://test.com", md)
         self.assertIn("enabled: true", md)
@@ -432,7 +432,7 @@ class TestFlow(unittest.TestCase):
         replies = asyncio.get_event_loop().run_until_complete(self._send("/发布"))
         self.assertIn("发布成功", replies[0])
         path, md = self.plugin.committed[0]
-        self.assertTrue(path.startswith("src/content/life/places/"))
+        self.assertTrue(path.startswith("src/content/地点/"))
         self.assertIn('province: "陕西"', md)
         self.assertIn("lat: 34.477861", md)
         self.assertIn("lng: 110.084789", md)
@@ -442,7 +442,7 @@ class TestFlow(unittest.TestCase):
         tmp.unlink(missing_ok=True)
 
     def test_album_new_flow(self):
-        """新建相册：图片上传 blog/album/<相册名>，创建 src/content/album/<相册名>.md。"""
+        """新建相册：图片上传 blog/album/<相册名>，创建 src/content/相册/<相册名>.md。"""
         from astrbot.api.message_components import Image
 
         tmp = Path(os.environ.get("TEMP", ".")) / "blogwriter_album.png"
@@ -458,7 +458,7 @@ class TestFlow(unittest.TestCase):
         self.assertEqual(self.plugin.last_upload_folder, "blog/album/情侣头像")
         self.assertEqual(len(self.plugin.committed), 1)
         path, md = self.plugin.committed[0]
-        self.assertEqual(path, "src/content/album/情侣头像.md")
+        self.assertEqual(path, "src/content/相册/情侣头像.md")
         self.assertIn("title: 情侣头像", md)
         self.assertIn('imgbedFolder: "blog/album/情侣头像"', md)
         self.assertNotIn("photos:", md)
@@ -916,7 +916,7 @@ class TestBillSchedule(unittest.TestCase):
         self.assertTrue(any("发布成功" in r for r in replies))
         self.assertEqual(len(self.plugin.committed), 1)
         path, md = self.plugin.committed[0]
-        self.assertTrue(path.startswith("src/content/bills/"))
+        self.assertTrue(path.startswith("src/content/账单/"))
         # 2026-08 新格式：字符串带引号、tags 行内数组
         self.assertIn("amount: -32", md)
         self.assertIn('category: "餐饮"', md)
@@ -928,7 +928,7 @@ class TestBillSchedule(unittest.TestCase):
         self.assertTrue(any("发布成功" in r for r in replies))
         self.assertEqual(len(self.plugin.committed), 1)
         path, md = self.plugin.committed[0]
-        self.assertTrue(path.startswith("src/content/schedules/"))
+        self.assertTrue(path.startswith("src/content/日程/"))
         self.assertIn('title: "周会"', md)
         # 含时间的日程应调度提醒
         self.assertEqual(len(self.plugin.scheduled), 1)
@@ -944,7 +944,7 @@ class TestBillSchedule(unittest.TestCase):
         self.assertTrue(any("批量发布成功" in r for r in replies))
         self.assertEqual(len(self.plugin.committed), 3)
         first_path, first_md = self.plugin.committed[0]
-        self.assertTrue(first_path.startswith("src/content/schedules/lunar-8-24-"))
+        self.assertTrue(first_path.startswith("src/content/日程/lunar-8-24-"))
         self.assertIn("isLunar: true", first_md)
         self.assertIn("lunarMonth: 8", first_md)
         self.assertIn("lunarDay: 24", first_md)
@@ -1030,7 +1030,7 @@ class TestBillSchedule(unittest.TestCase):
             replies = asyncio.get_event_loop().run_until_complete(self._send("/发布"))
             self.assertTrue(any("发布成功" in r for r in replies))
             path, md = self.plugin.committed[0]
-            self.assertEqual(path, "src/content/bangumi/anime/侏罗纪世界.md")
+            self.assertEqual(path, "src/content/追番/anime/侏罗纪世界.md")
             self.assertIn("category: anime", md)
             self.assertIn("subcategory: movie", md)
             self.assertIn("score: 8", md)
@@ -1079,7 +1079,7 @@ class TestBillSchedule(unittest.TestCase):
             replies = asyncio.get_event_loop().run_until_complete(self._send("/发布"))
             self.assertTrue(any("发布成功" in r for r in replies))
             path, md = self.plugin.committed[0]
-            self.assertEqual(path, "src/content/bangumi/book/认知觉醒.md")
+            self.assertEqual(path, "src/content/追番/book/认知觉醒.md")
             self.assertIn("category: book", md)
             self.assertNotIn("subcategory", md)
             self.assertIn("score: 9", md)
@@ -1126,7 +1126,7 @@ class TestBillSchedule(unittest.TestCase):
                 replies = asyncio.get_event_loop().run_until_complete(self._send("/发布"))
                 self.assertTrue(any("发布成功" in r for r in replies))
                 path, md = self.plugin.committed[0]
-                self.assertEqual(path, "src/content/bangumi/anime/正确片名.md")
+                self.assertEqual(path, "src/content/追番/anime/正确片名.md")
                 self.assertIn("subcategory: tv", md)
             finally:
                 tmp.unlink(missing_ok=True)
@@ -1223,7 +1223,7 @@ class TestBillSchedule(unittest.TestCase):
             replies = asyncio.get_event_loop().run_until_complete(self._send("/发布"))
             self.assertTrue(any("发布成功" in r for r in replies))
             path, md = self.plugin.committed[0]
-            self.assertEqual(path, "src/content/daohang/学习网站/app-pagescms-org.md")
+            self.assertEqual(path, "src/content/导航/学习网站/app-pagescms-org.md")
             self.assertIn("name: PagesCMS", md)
             self.assertIn("url: https://app.pagescms.org", md)
             self.assertIn("description: 后台管理", md)
@@ -1317,7 +1317,7 @@ class TestBillSchedule(unittest.TestCase):
         replies = asyncio.get_event_loop().run_until_complete(self._send("/发布"))
         self.assertTrue(any("发布成功" in r for r in replies))
         path, md = self.plugin.committed[0]
-        self.assertTrue(path.startswith("src/content/schedules/lunar-8-24-我生日"))
+        self.assertTrue(path.startswith("src/content/日程/lunar-8-24-我生日"))
         self.assertIn('category: "birthday"', md)
         self.assertIn("isLunar: true", md)
         # 全天生日不调度提醒
@@ -1333,7 +1333,7 @@ class TestBillSchedule(unittest.TestCase):
         replies = asyncio.get_event_loop().run_until_complete(self._send("/发布"))
         self.assertTrue(any("发布成功" in r for r in replies))
         path, md = self.plugin.committed[0]
-        self.assertTrue(path.startswith("src/content/schedules/2026-01-01-"))
+        self.assertTrue(path.startswith("src/content/日程/2026-01-01-"))
         self.assertIn('category: "anniversary"', md)
         self.assertIn('person: "宝宝"', md)
         self.assertEqual(len(self.plugin.scheduled), 0)
@@ -1750,7 +1750,7 @@ class TestWizardFlow(unittest.TestCase):
             replies = asyncio.get_event_loop().run_until_complete(self._send("/发布"))
             self.assertTrue(any("发布成功" in r for r in replies))
             path, md = self.plugin.committed[0]
-            self.assertTrue(path.startswith("src/content/bangumi/game/"))
+            self.assertTrue(path.startswith("src/content/追番/game/"))
             self.assertIn("category: game", md)
             self.assertNotIn("subcategory", md)
         finally:
@@ -1775,7 +1775,7 @@ class TestWizardFlow(unittest.TestCase):
             replies = asyncio.get_event_loop().run_until_complete(self._send("/发布"))
             self.assertTrue(any("发布成功" in r for r in replies))
             path, md = self.plugin.committed[0]
-            self.assertTrue(path.startswith("src/content/bangumi/anime/"))
+            self.assertTrue(path.startswith("src/content/追番/anime/"))
             self.assertIn("subcategory: anime", md)
         finally:
             tmp.unlink(missing_ok=True)
@@ -1813,11 +1813,11 @@ class TestWizardFlow(unittest.TestCase):
         # 索引先于笔记提交，路径与内容正确
         self.assertEqual(len(puts), 1)
         idx_path, idx_md = puts[0]
-        self.assertEqual(idx_path, "src/content/life/notebooks/全新笔记本/_index.json")
+        self.assertEqual(idx_path, "src/content/笔记本/全新笔记本/_index.json")
         self.assertIn("全新笔记本", idx_md)
         self.assertEqual(len(self.plugin.committed), 1)
         note_path, note_md = self.plugin.committed[0]
-        self.assertTrue(note_path.startswith("src/content/life/notebooks/全新笔记本/"))
+        self.assertTrue(note_path.startswith("src/content/笔记本/全新笔记本/"))
         self.assertIn("正文内容", note_md)
 
     def test_note_publish_existing_notebook_no_index(self):
@@ -1943,7 +1943,7 @@ class TestArticleFlow(unittest.TestCase):
             self.assertTrue(any("转载成功" in r for r in replies))
             self.assertEqual(len(self.plugin.committed), 1)
             path, md = self.plugin.committed[0]
-            self.assertEqual(path, "src/content/posts/技术分享/测试文章标题.md")
+            self.assertEqual(path, "src/content/文章/技术分享/测试文章标题.md")
             self.assertIn("sourceLink: https://mp.weixin.qq.com/s/abc", md)
             self.assertIn("tags:\n  - 转载", md)
             self.assertIn("本文转载自微信公众号「测试公众号」", md)
