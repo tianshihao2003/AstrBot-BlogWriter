@@ -432,7 +432,7 @@ class TestFlow(unittest.TestCase):
         replies = asyncio.get_event_loop().run_until_complete(self._send("/发布"))
         self.assertIn("发布成功", replies[0])
         path, md = self.plugin.committed[0]
-        self.assertTrue(path.startswith("src/content/地点/"))
+        self.assertTrue(path.startswith("src/content/足迹/"))
         self.assertIn('province: "陕西"', md)
         self.assertIn("lat: 34.477861", md)
         self.assertIn("lng: 110.084789", md)
@@ -858,7 +858,7 @@ class TestMediaFlow(unittest.TestCase):
             replies = asyncio.get_event_loop().run_until_complete(self._send("/发布"))
             self.assertTrue(any("发布成功" in r for r in replies))
             path, md = self.plugin.committed[0]
-            self.assertEqual(path, "src/content/追番/anime/侏罗纪世界.md")
+            self.assertEqual(path, "src/content/影视/anime/侏罗纪世界.md")
             self.assertIn("category: anime", md)
             self.assertIn("subcategory: movie", md)
             self.assertIn("score: 8", md)
@@ -907,7 +907,7 @@ class TestMediaFlow(unittest.TestCase):
             replies = asyncio.get_event_loop().run_until_complete(self._send("/发布"))
             self.assertTrue(any("发布成功" in r for r in replies))
             path, md = self.plugin.committed[0]
-            self.assertEqual(path, "src/content/追番/book/认知觉醒.md")
+            self.assertEqual(path, "src/content/影视/book/认知觉醒.md")
             self.assertIn("category: book", md)
             self.assertNotIn("subcategory", md)
             self.assertIn("score: 9", md)
@@ -954,7 +954,7 @@ class TestMediaFlow(unittest.TestCase):
                 replies = asyncio.get_event_loop().run_until_complete(self._send("/发布"))
                 self.assertTrue(any("发布成功" in r for r in replies))
                 path, md = self.plugin.committed[0]
-                self.assertEqual(path, "src/content/追番/anime/正确片名.md")
+                self.assertEqual(path, "src/content/影视/anime/正确片名.md")
                 self.assertIn("subcategory: tv", md)
             finally:
                 tmp.unlink(missing_ok=True)
@@ -1239,7 +1239,7 @@ class TestWizardFlow(unittest.TestCase):
             replies = asyncio.get_event_loop().run_until_complete(self._send("/发布"))
             self.assertTrue(any("发布成功" in r for r in replies))
             path, md = self.plugin.committed[0]
-            self.assertTrue(path.startswith("src/content/追番/game/"))
+            self.assertTrue(path.startswith("src/content/影视/game/"))
             self.assertIn("category: game", md)
             self.assertNotIn("subcategory", md)
         finally:
@@ -1264,7 +1264,7 @@ class TestWizardFlow(unittest.TestCase):
             replies = asyncio.get_event_loop().run_until_complete(self._send("/发布"))
             self.assertTrue(any("发布成功" in r for r in replies))
             path, md = self.plugin.committed[0]
-            self.assertTrue(path.startswith("src/content/追番/anime/"))
+            self.assertTrue(path.startswith("src/content/影视/anime/"))
             self.assertIn("subcategory: anime", md)
         finally:
             tmp.unlink(missing_ok=True)

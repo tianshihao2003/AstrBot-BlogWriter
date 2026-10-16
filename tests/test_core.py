@@ -625,7 +625,7 @@ class TestMedia(unittest.TestCase):
             subcategory="movie",
             now=datetime(2026, 8, 23),
         )
-        # 对齐博客现有 src/content/追番/anime/侏罗纪世界.md 格式
+        # 对齐博客现有 src/content/影视/anime/侏罗纪世界.md 格式
         self.assertIn("title: 侏罗纪世界", md)
         self.assertIn("category: anime", md)
         self.assertIn("subcategory: movie", md)

@@ -79,7 +79,7 @@ name: 标题
 
 分类来自 `/笔记` 第一个参数；默认 `日常随笔`（配置 default_note_dir）。
 
-### 足迹 → `src/content/地点/YYYY-MM-DD[-N].md`
+### 足迹 → `src/content/足迹/YYYY-MM-DD[-N].md`
 
 ```yaml
 ---

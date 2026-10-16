@@ -1282,7 +1282,7 @@ class BlogWriter(Star):
                     category="book",
                     now=now,
                 )
-                path = "src/content/追番/book/{}.md".format(clean_filename_part(book_title))
+                path = "src/content/影视/book/{}.md".format(clean_filename_part(book_title))
                 link = "/books"
             elif session.kind == "media":
                 # 影视/游戏条目：category 由向导决定（anime/game），落盘目录随之分流
@@ -1311,7 +1311,7 @@ class BlogWriter(Star):
                     category=media_category,
                     now=now,
                 )
-                path = "src/content/追番/{}/{}.md".format(media_dir, clean_filename_part(media_title))
+                path = "src/content/影视/{}/{}.md".format(media_dir, clean_filename_part(media_title))
                 link = "/movies-games" if media_category == "game" else "/bangumi"
             else:
                 lat, lng = await self._geocode(
@@ -1331,7 +1331,7 @@ class BlogWriter(Star):
                     self._merge_tags(self._cfg("place_tags", ["旅游"]), session.meta.get("tags")),
                     now,
                 )
-                path = "src/content/地点/{}.md".format(place_filename(now))
+                path = "src/content/足迹/{}.md".format(place_filename(now))
                 link = "/地点/{}".format(place_filename(now))
         except Exception as e:
             logger.error("BlogWriter 生成 markdown 失败: {}".format(e))

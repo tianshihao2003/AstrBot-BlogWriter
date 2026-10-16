@@ -281,7 +281,7 @@ def build_place_md(
     tags: List[str],
     day: datetime = None,
 ) -> str:
-    """对齐博客最新足迹格式（2026-08-22 参照 src/content/地点/）：
+    """对齐博客最新足迹格式（2026-08-22 参照 src/content/足迹/）：
     新增 description 固定句式、不再写 visitCount（schema 默认 1）、
     字符串带引号、tags 行内数组、photos 多行带引号。
     """
