@@ -128,10 +128,5 @@
     "description": "转载文章默认标签（/转载 生成的文章会带上）",
     "type": "list",
     "default": ["转载"]
-  },
-  "schedule_remind_before": {
-    "description": "提醒默认提前分钟（0=准点）",
-    "type": "int",
-    "default": 10
   }
 }

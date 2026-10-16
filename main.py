@@ -42,18 +42,6 @@ def now_shanghai_tz() -> datetime:
     return datetime.now(SHANGHAI_TZ)
 
 
-try:
-    from apscheduler.schedulers.background import BackgroundScheduler
-    from apscheduler.triggers.date import DateTrigger
-
-    HAS_APSCHEDULER = True
-except ImportError:
-    BackgroundScheduler = None  # type: ignore
-    DateTrigger = None  # type: ignore
-    HAS_APSCHEDULER = False
-
-REMINDER_FILE = Path(__file__).parent / "data" / "schedules_reminder.json"
-
 from astrbot.api import AstrBotConfig, logger
 from astrbot.api.event import AstrMessageEvent, MessageEventResult, filter
 from astrbot.api.message_components import Image, Plain
@@ -201,267 +189,6 @@ class BlogWriter(Star):
         self._lock = asyncio.Lock()
         self._client = None
         self._hint_at: Dict[str, float] = {}  # 非白名单 ID 提示的冷却时间戳（monotonic）
-        self._reminders: List[Tuple[str, str, datetime]] = []
-        self._reminder_file = self._resolve_reminder_file()
-        self._loop = None
-        try:
-            self._loop = asyncio.get_running_loop()
-        except RuntimeError:
-            try:
-                self._loop = asyncio.get_event_loop()
-            except Exception:
-                self._loop = None
-        self._scheduler = None
-        if HAS_APSCHEDULER:
-            try:
-                # 显式指定上海时区，避免 UTC 偏差
-                try:
-                    self._scheduler = BackgroundScheduler(timezone=SHANGHAI_TZ)
-                except Exception:
-                    self._scheduler = BackgroundScheduler()
-                self._scheduler.start()
-                self._restore_reminders()
-                logger.info("BlogWriter: APScheduler 提醒调度器已启动（持久化：%s）", self._reminder_file)
-            except Exception as e:
-                logger.warning("BlogWriter: APScheduler 启动失败: %s", e)
-                self._scheduler = None
-        else:
-            logger.warning("BlogWriter: 未安装 apscheduler，提醒功能将仅内存生效（重启丢失）")
-            # 无调度器时仍把持久化提醒恢复到内存列表（否则 /提醒 列表 在重启后为空）
-            self._restore_reminders()
-
-    def _resolve_reminder_file(self) -> Path:
-        """提醒持久化路径。官方规范（docs.astrbot.app/dev/star）：持久化数据应存
-        AstrBot 根 data/ 目录，而非插件自身目录——否则重装/更新插件 zip 时被覆盖。
-        识别 AstrBot 根：cwd 下存在 data/plugins 或 data/config；识别不到（本地开发/
-        测试）回退插件目录旧行为。"""
-        try:
-            cwd = Path(os.getcwd())
-            if (cwd / "data" / "plugins").is_dir() or (cwd / "data" / "config").is_dir():
-                return cwd / "data" / "plugin_data" / "blog_writer" / "schedules_reminder.json"
-        except Exception as e:
-            logger.warning("BlogWriter: 解析提醒持久化路径失败，回退插件目录: %s", e)
-        return REMINDER_FILE
-
-    def _load_reminders(self) -> List[Dict]:
-        # 测试通过替换模块级 REMINDER_FILE 隔离路径时优先之；否则先读新路径，
-        # 再读插件目录旧路径（老用户迁移兼容，不丢历史提醒）
-        rf = globals().get("REMINDER_FILE", REMINDER_FILE)
-        if rf != REMINDER_FILE:
-            paths = [rf]
-        else:
-            paths = [self._reminder_file, REMINDER_FILE]
-        for p in paths:
-            try:
-                if p.exists():
-                    return json.loads(p.read_text(encoding="utf-8"))
-            except Exception as e:
-                logger.warning("BlogWriter: 读取提醒文件失败: %s (%s)", e, p)
-        return []
-
-    def _save_reminders(self, data: List[Dict]) -> None:
-        try:
-            p = self._reminder_file
-            p.parent.mkdir(parents=True, exist_ok=True)
-            p.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-        except Exception as e:
-            logger.warning("BlogWriter: 保存提醒文件失败: %s", e)
-
-    def _restore_reminders(self) -> None:
-        if not hasattr(self, "_reminders"):
-            self._reminders = []
-        if not HAS_APSCHEDULER or not self._scheduler:
-            # 无调度器时仍恢复到内存列表，供列表展示
-            try:
-                for item in self._load_reminders():
-                    try:
-                        remind_at = datetime.fromisoformat(item["remind_at"])
-                        if remind_at.tzinfo is not None:
-                            remind_at = remind_at.astimezone(SHANGHAI_TZ).replace(tzinfo=None)
-                        if remind_at <= now_shanghai():
-                            continue
-                        self._reminders.append((item["user_id"], item["title"], remind_at))
-                    except Exception:
-                        continue
-            except Exception as e:
-                logger.warning("BlogWriter: 恢复提醒(内存)异常: %s", e)
-            return
-        try:
-            for item in self._load_reminders():
-                try:
-                    remind_at = datetime.fromisoformat(item["remind_at"])
-                    if remind_at.tzinfo is not None:
-                        remind_at = remind_at.astimezone(SHANGHAI_TZ).replace(tzinfo=None)
-                    if remind_at <= now_shanghai():
-                        continue
-                    self._reminders.append((item["user_id"], item["title"], remind_at))
-                    origin = item.get("origin") or ""
-                    # 调度时用上海时区，存的是 naive，按上海解释
-                    try:
-                        remind_at_tz = remind_at.replace(tzinfo=SHANGHAI_TZ)
-                    except Exception:
-                        remind_at_tz = remind_at
-                    self._scheduler.add_job(
-                        self._send_remind_sync,
-                        trigger=DateTrigger(run_date=remind_at_tz),
-                        args=[item["user_id"], item["title"], origin],
-                        # 与 _schedule_remind 的 id 格式一致，保证 replace_existing 生效
-                        id=item.get("id") or f"{item['user_id']}_{item['title']}_{remind_at.isoformat()}",
-                        replace_existing=True,
-                    )
-                except Exception as e:
-                    logger.warning("BlogWriter: 恢复提醒失败: %s %s", item, e)
-        except Exception as e:
-            logger.warning("BlogWriter: 恢复提醒异常: %s", e)
-
-    def _send_remind_sync(self, user_id: str, title: str, origin: str = "") -> None:
-        # 使用初始化时保存的 loop，避免取到错误 loop 导致 Timeout context manager 异常
-        loop = getattr(self, "_loop", None)
-        if loop is None:
-            try:
-                loop = asyncio.get_running_loop()
-                self._loop = loop
-            except RuntimeError:
-                try:
-                    loop = asyncio.get_event_loop()
-                    self._loop = loop
-                except Exception:
-                    loop = None
-        try:
-            if loop and loop.is_running():
-                asyncio.run_coroutine_threadsafe(self._send_remind(user_id, title, origin), loop)
-            else:
-                asyncio.run(self._send_remind(user_id, title, origin))
-        except RuntimeError:
-            # 无运行中的 loop 时创建临时 loop
-            try:
-                asyncio.run(self._send_remind(user_id, title, origin))
-            except Exception as e:
-                logger.warning("BlogWriter: 同步发送提醒失败: %s", e)
-
-    async def _send_remind(self, user_id: str, title: str, origin: str = "") -> None:
-        try:
-            logger.info("BlogWriter: 到点提醒 user=%s title=%s origin=%s", user_id, title, origin)
-            sent = False
-            # 1. 优先用 origin + MessageChain（按 AstrBot 官方文档：MessageChain().message() + send_message(origin, chain)）
-            if origin and hasattr(self.context, "send_message"):
-                def _make_chain(text: str):
-                    # 标准构造：优先尝试最简的 List[Plain]，再尝试 MessageChain
-                    # 先试最简，避免 MessageChain().message() 内部的 timeout 陷阱
-                    try:
-                        from astrbot.core.message.message_event_result import MessageChain as _MC  # type: ignore
-
-                        # 直接构造，避免调用 .message()（其内部可能用 asyncio.timeout）
-                        try:
-                            return _MC(chain=[Plain(text)])  # type: ignore
-                        except Exception:
-                            try:
-                                return _MC([Plain(text)])  # type: ignore
-                            except Exception:
-                                pass
-                    except ImportError:
-                        pass
-                    except Exception:
-                        pass
-                    try:
-                        from astrbot.core.message.message import MessageChain as _MC1  # type: ignore
-
-                        try:
-                            return _MC1([Plain(text)])  # type: ignore
-                        except Exception:
-                            try:
-                                return _MC1(chain=[Plain(text)])  # type: ignore
-                            except Exception:
-                                pass
-                    except ImportError:
-                        pass
-                    except Exception:
-                        pass
-                    # 兜底：直接 Plain 列表，很多版本 send_message 也接受
-                    return [Plain(text)]  # type: ignore
-
-                for idx, maker in enumerate(
-                    [
-                        lambda: _make_chain(title),
-                        lambda: [Plain(title)],  # type: ignore
-                        lambda: Plain(title),  # type: ignore
-                        lambda: title,  # type: ignore
-                    ]
-                ):
-                    try:
-                        chain = maker()  # type: ignore
-                        await self.context.send_message(origin, chain)  # type: ignore
-                        sent = True
-                        logger.info("BlogWriter: 主动推送 via origin 成功 origin=%s attempt=%s", origin, idx)
-                        break
-                    except Exception as e:
-                        logger.warning("BlogWriter: 主动推送 via origin 失败 attempt=%s err=%s", idx, e)
-                        continue
-                if not sent:
-                    logger.warning("BlogWriter: 主动推送 via origin 失败: all attempts failed origin=%s", origin)
-            # 2. 兜底：按 origin 解析平台名再试（兼容 weixin_oc / weixin_personal_bglh）
-            if not sent and hasattr(self.context, "get_platform"):
-                plat_names = []
-                if origin and ":" in origin:
-                    plat_names.append(origin.split(":")[0])
-                plat_names.extend(["weixin_oc", "weixin_personal_bglh", "weixin"])
-
-                def _plat_chain(text: str):
-                    try:
-                        from astrbot.core.message.message import MessageChain as _PMC1  # type: ignore
-
-                        try:
-                            return _PMC1(chain=[Plain(text)])  # type: ignore
-                        except Exception:
-                            try:
-                                _mc = _PMC1()  # type: ignore
-                                _mc.chain = [Plain(text)]  # type: ignore
-                                return _mc
-                            except Exception:
-                                return _PMC1([Plain(text)])  # type: ignore
-                    except ImportError:
-                        try:
-                            from astrbot.core.message.components import MessageChain as _PMC2  # type: ignore
-
-                            return _PMC2([Plain(text)])  # type: ignore
-                        except ImportError:
-                            return [Plain(text)]  # type: ignore
-                    except Exception:
-                        return [Plain(text)]  # type: ignore
-
-                seen = set()
-                for pname in plat_names:
-                    if not pname or pname in seen:
-                        continue
-                    seen.add(pname)
-                    try:
-                        plat = self.context.get_platform(pname)
-                        if plat and hasattr(plat, "send_message"):
-                            for idx, attempt in enumerate(
-                                [
-                                    lambda p=plat: p.send_message(_plat_chain(title), user_id),  # type: ignore
-                                    lambda p=plat: p.send_message(Plain(title), user_id),  # type: ignore
-                                    lambda p=plat: p.send_message(title, user_id),  # type: ignore
-                                    lambda p=plat: p.send_message([Plain(title)], user_id),  # type: ignore
-                                    lambda p=plat: p.send_message(user_id, _plat_chain(title)),  # type: ignore
-                                ]
-                            ):
-                                try:
-                                    await attempt()  # type: ignore
-                                    sent = True
-                                    logger.info("BlogWriter: 平台推送成功 via %s attempt=%s", pname, idx)
-                                    break
-                                except Exception as e:
-                                    logger.warning("BlogWriter: 平台 %s 尝试 %s 失败: %s", pname, idx, e)
-                                    continue
-                        if sent:
-                            break
-                    except Exception as e:
-                        logger.warning("BlogWriter: 平台 %s 获取失败: %s", pname, e)
-            if not sent:
-                logger.warning("BlogWriter: 未能主动推送，提醒仅记录日志 user=%s title=%s", user_id, title)
-        except Exception as e:
-            logger.warning("BlogWriter: 发送提醒失败: %s", e)
 
     def _get_client(self) -> httpx.AsyncClient:
         if self._client is None:
@@ -551,19 +278,6 @@ class BlogWriter(Star):
             pass
         return False
 
-    @staticmethod
-    def _proactive_supported(event: AstrMessageEvent) -> bool:
-        """平台是否支持主动推送（定时提醒依赖它）。
-
-        企业微信（客服/应用，platform_meta.support_proactive_message=False）不支持，
-        到点提醒送不到；QQ 官方/微信/NapCat 支持。
-        """
-        try:
-            meta = getattr(event, "platform_meta", None) or getattr(event, "platform", None)
-            return bool(getattr(meta, "support_proactive_message", True))
-        except Exception:
-            return True
-
     def _unauthorized_hint_text(self, event: AstrMessageEvent, user_id: str, cmd: Optional[str]) -> str:
         """非白名单用户发命令时的一次性「ID 提示」（跨平台加白名单用）。
 
@@ -651,50 +365,6 @@ class BlogWriter(Star):
         expired = [uid for uid, s in self._sessions.items() if s.expired(now)]
         for uid in expired:
             del self._sessions[uid]
-
-    def _schedule_remind(self, user_id: str, title: str, remind_at: datetime, unified_msg_origin: str = "", remind_before: int = 10) -> None:
-        """持久化调度：写入 json + APScheduler 定时，到点私聊提醒。 past 则不调度。"""
-        try:
-            if remind_at <= now_shanghai():
-                logger.info("BlogWriter: 提醒时间已过，不调度 user=%s title=%s at=%s", user_id, title, remind_at)
-                return
-            # 确保 remind_at 为上海时区的 naive 时间，调度器按本地时间触发
-            # APScheduler 默认使用本地时区，但容器内可能为 UTC，需显式指定
-            try:
-                remind_at_tz = remind_at.replace(tzinfo=SHANGHAI_TZ) if remind_at.tzinfo is None else remind_at.astimezone(SHANGHAI_TZ)
-            except Exception:
-                remind_at_tz = remind_at
-            logger.info("BlogWriter: 调度提醒 user=%s title=%s at=%s origin=%s before=%s", user_id, title, remind_at, unified_msg_origin, remind_before)
-            if not hasattr(self, "_reminders"):
-                self._reminders = []
-            self._reminders.append((user_id, title, remind_at))
-            # 持久化
-            try:
-                data = self._load_reminders()
-                rid = f"{user_id}_{title}_{remind_at.isoformat()}"
-                data.append({"id": rid, "user_id": user_id, "title": title, "remind_at": remind_at.isoformat(), "remind_before": remind_before, "origin": unified_msg_origin})
-                # 只保留未来 100 条
-                data = [d for d in data if datetime.fromisoformat(d["remind_at"]) > now_shanghai() - timedelta(days=1)][-100:]
-                self._save_reminders(data)
-            except Exception as e:
-                logger.warning("BlogWriter: 保存提醒持久化失败: %s", e)
-            # 调度
-            if HAS_APSCHEDULER and self._scheduler:
-                try:
-                    rid = f"{user_id}_{title}_{remind_at.isoformat()}"
-                    # 显式指定上海时区，避免 UTC 偏差
-                    trigger = DateTrigger(run_date=remind_at_tz) if HAS_APSCHEDULER else DateTrigger(run_date=remind_at)
-                    self._scheduler.add_job(
-                        self._send_remind_sync,
-                        trigger=trigger,
-                        args=[user_id, f"🔔 提醒：{title} 时间到了", unified_msg_origin],
-                        id=rid,
-                        replace_existing=True,
-                    )
-                except Exception as e:
-                    logger.warning("BlogWriter: APScheduler 添加任务失败: %s", e)
-        except Exception as e:
-            logger.warning("BlogWriter: 调度提醒失败: %s", e)
 
     # ---------- 向导辅助 ----------
 
@@ -920,66 +590,6 @@ class BlogWriter(Star):
             "发 /发布 提交，/取消 放弃。".format(info["title"], info["year"] or "未知年份", sub_label, vote_hint)
         )
 
-    def _handle_remind(self, event: AstrMessageEvent, user_id: str, args: List[str]):
-        text = " ".join(args).strip().lower()
-        # 取消
-        if text.startswith("取消") or text.startswith("cancel"):
-            target = text.replace("取消", "").replace("cancel", "").strip()
-            if not target:
-                return event.plain_result("用法：/提醒 取消 <标题关键词> 或 /提醒 取消 全部")
-            try:
-                data = self._load_reminders()
-                before = len(data)
-                if target in ("全部", "all", "所有"):
-                    data = [d for d in data if d["user_id"] != user_id]
-                    if HAS_APSCHEDULER and self._scheduler:
-                        for job in list(self._scheduler.get_jobs()):
-                            if job.id.startswith(user_id):
-                                self._scheduler.remove_job(job.id)
-                else:
-                    new_data = []
-                    for d in data:
-                        if d["user_id"] == user_id and target in d["title"]:
-                            if HAS_APSCHEDULER and self._scheduler:
-                                try:
-                                    self._scheduler.remove_job(d["id"])
-                                except Exception:
-                                    pass
-                            continue
-                        new_data.append(d)
-                    data = new_data
-                self._save_reminders(data)
-                return event.plain_result(f"已取消 {before - len(data)} 条提醒。")
-            except Exception as e:
-                return event.plain_result(f"取消失败：{e}")
-        # 列表
-        try:
-            data = self._load_reminders()
-            mine = [d for d in data if d["user_id"] == user_id and datetime.fromisoformat(d["remind_at"]) > now_shanghai()]
-            if not mine:
-                # 兼容旧内存
-                if hasattr(self, "_reminders") and self._reminders:
-                    lines = ["提醒列表（内存）："]
-                    for uid, title, at in self._reminders[-10:]:
-                        if uid == user_id:
-                            lines.append(f"- {title} 于 {at.strftime('%Y-%m-%d %H:%M:%S') if isinstance(at, datetime) else at}")
-                    if len(lines) > 1:
-                        return event.plain_result("\n".join(lines))
-                return event.plain_result("当前没有待提醒的事项。可用 /提醒 取消 标题关键词 取消已有提醒。")
-            lines = ["提醒列表："]
-            for d in mine[-10:]:
-                rb = d.get("remind_before", self._cfg('schedule_remind_before',10))
-                try:
-                    rb = int(rb)
-                except Exception:
-                    rb = 10
-                # 兼容旧数据：remind_at 可能为 naive，需按上海时间显示
-                at_str = d['remind_at'].replace('T',' ')[:19]
-                lines.append(f"- {d['title']} 于 {at_str} (提前{rb}分)")
-            return event.plain_result("\n".join(lines))
-        except Exception as e:
-            return event.plain_result(f"读取提醒失败：{e}")
-
     # ---------- 消息入口 ----------
 
     @filter.event_message_type(filter.EventMessageType.ALL)
@@ -1082,9 +692,6 @@ class BlogWriter(Star):
                 return
             if cmd == "转载":
                 yield await self._handle_article(event, user_id, args)
-                return
-            if cmd == "提醒":
-                yield self._handle_remind(event, user_id, args)
                 return
             if cmd == "发布":
                 yield await self._publish(event, user_id)
@@ -2466,8 +2073,6 @@ class BlogWriter(Star):
             "/发布　提交当前会话\n"
             "/取消　放弃当前会话\n"
             "/状态　查看当前会话\n"
-            "/提醒 列表　看待提醒\n"
-            "/提醒 取消 标题　取消提醒\n"
             "\n"
             "发 /帮助 随时查看本手册"
         )
@@ -2477,10 +2082,3 @@ class BlogWriter(Star):
         if self._client is not None:
             await self._client.aclose()
             self._client = None
-        # 官方规范：卸载/停用插件时必须清理后台线程，否则重载后调度器残留可能双发提醒
-        if self._scheduler is not None:
-            try:
-                self._scheduler.shutdown(wait=False)
-            except Exception as e:
-                logger.warning("BlogWriter: 关闭提醒调度器失败: %s", e)
-            self._scheduler = None
