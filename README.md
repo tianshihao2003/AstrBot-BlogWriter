@@ -14,7 +14,7 @@
 - ✅ 微信对话直接发布动态 / 足迹 / 友链 / 相册 / 影视 / 书籍 / 导航（全部命令式，2026-08 起移除 AI 抽取，纯正则解析零外部 AI 依赖）
 - ⛔ **账单 / 日程 / 生日 / 纪念日 与「日程提醒」已移除**（2026-10-16）：博客端同步删掉了 `bills`/`schedules` 两个集合与 `/bills`、`/schedules` 路由，插件的对应命令、正则解析、写入逻辑、向导与 APScheduler 提醒子系统（`/提醒`、`schedules_reminder.json`）一并摘除，避免「提示发布成功但站点看不到、链接 404」
 - ⛔ **笔记（notebooks）已移除**（2026-10-20）：站长要求私人笔记不再公开，博客端删掉了 `notebooks` 集合与 `/life/notebooks/` 路由（内容移至 `src/content/笔记本归档/`，在 `.gitignore` 内只留本地 Obsidian 库），插件的 `/笔记` 命令、`_start_note`、笔记本向导、`_list_notebook_names` / `_ensure_notebook_index`、`build_note_md` / `build_notebook_index_json` / `parse_note` / `note_filename` 与 `default_note_dir` 配置一并摘除——避免「发布成功但站点看不到」，更要紧的是**不能把私人笔记继续 commit 进公开仓库**
-- ✅ 动态支持图片、动图 GIF 与视频：微信视频自动下载、上传图床，URL 进动态 `images` 数组（视频仅动态支持）
+- ✅ 动态支持图片、动图 GIF 与视频：微信视频自动下载、上传图床，URL 以 Markdown 语法 `![](url)` 写进动态**正文**（2026-10-21 起不再写 frontmatter `images` 数组，这样 Obsidian 打开 md 能直接看到图；alt 必须留空；视频仅动态支持）
 - ✅ 相册发布：新相册自动建 `src/content/相册/<名>.md`（含 `subtitle`/`imgbedFolder`，对齐博客现有格式）触发构建；已有相册（按标题/文件名判断）只传图不写文件，照片进命中相册自己的图床目录
 - ✅ 图片自动上传图床（统一上传到 `imgbed_upload_folder`，默认 `blog/moments`，与博客图床目录惯例一致）
 - ✅ 足迹坐标自动获取（高德地理编码 API）；足迹格式对齐博客最新（含 `description` 固定句式）

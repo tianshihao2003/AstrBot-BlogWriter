@@ -43,25 +43,31 @@
 - 非白名单用户一律拒绝（回复「无权限」）
 - 其他命令/普通消息不消费，放行给其他插件或 AI
 - 缺省规则：`/动态` 无正文 → 报错提示；`/足迹` 参数不足 → 报错
-- 图片落位：动态 → frontmatter `images` 数组；足迹 → photos 列表
+- 图片落位：动态 → **正文** `![](url)`（空 alt，一行一张，排在正文文字之后）；足迹 → frontmatter `photos` 列表
 
 ## 4. 文件生成规则（对齐现有数据）
 
 ### 动态 → `src/content/动态/YYYY-MM-DD[-N].md`
 
-```yaml
+```markdown
 ---
 published: 2026-08-08 14:30:00   # 本地时间精确到秒
 tags:
   - 日常                          # 配置 moment_tags
-images:
-  - https://img.tsh520.cn/file/blog/moments/xxx.jpg
 ---
 
 正文文字
+
+![](https://img.tsh520.cn/file/blog/moments/xxx.jpg)
 ```
 
-> 2026-08-13 起不再写 `author`/`avatar`（博客 schema 已提供默认值 `团子和蛋糕`、`/assets/ziyuan/tx.webp`）。图片放 frontmatter `images` 数组，正文只放文字。
+> 2026-08-13 起不再写 `author`/`avatar`（博客 schema 已提供默认值 `团子和蛋糕`、`/assets/ziyuan/tx.webp`）。
+>
+> **2026-10-21 起图片从 frontmatter `images` 数组迁到正文**：一行一张写在正文文字之后，`![](url)`
+> 且 **alt 必须留空**（非空会被博客的 `rehype-figure` 包成 `<figure>` + `<figcaption>`，卡片里多一行图注）。
+> 目的是让 Obsidian 打开 md 时也能直接看到图。博客渲染侧用 `src/utils/moment-media.ts#resolveMomentMedia()`
+> 从正文提取图片做九宫格 / 视频分流，所以写在正文哪个位置都一样。
+> frontmatter 的 `images` 字段仅作存量兼容（`src/content.config.ts` 未删、`.pages.yml` 标注废弃），**新内容不要再写**。
 
 ### 足迹 → `src/content/足迹/YYYY-MM-DD[-N].md`
 
@@ -115,7 +121,7 @@ imgbedFolder: blog/album/情侣头像
   3. 平台 file id → 尝试 `event.get_file_url()`（能力探测，无则报错提示）
 - 下载用标准库（urllib），不引入额外依赖
 - 上传到图床：multipart `file` 字段 + `API_TOKEN` header，响应 `{"code":200,"data":{"url":"..."}}` 校验
-- 动态会话还接收 GIF（Image 组件 `.gif`，微信适配器自动下载）与视频（`Video` 组件，本地 `.mp4`）；视频仅动态会话接收，URL 与图片一样进 frontmatter `images` 数组
+- 动态会话还接收 GIF（Image 组件 `.gif`，微信适配器自动下载）与视频（`Video` 组件，本地 `.mp4`）；视频仅动态会话接收，URL 与图片一样以 `![](url)` 写进正文（按扩展名 `.mp4` 等被博客分流到视频区）
 - 视频扩展名白名单 `.mp4/.mov/.m4v/.webm`；大小上限视频 100MB、图片 20MB；微信 raw_message type 5（video_item）与图片同走 curl + AES 解密兜底，ref 带 `.mp4` 后缀
 - 任一张图上传失败 → 中止整个发布，回复错误，不写 md（绝不产生半成品提交）
 
