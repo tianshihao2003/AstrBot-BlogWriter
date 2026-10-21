@@ -25,7 +25,7 @@
     "default": ""
   },
   "imgbed_upload_folder": {
-    "description": "图片上传目录（动态/笔记/足迹照片统一上传到此目录，如 blog/moments）",
+    "description": "图片上传目录（动态/足迹照片统一上传到此目录，如 blog/moments）",
     "type": "string",
     "default": "blog/moments"
   },
@@ -83,11 +83,6 @@
     "description": "足迹默认标签",
     "type": "list",
     "default": ["旅游"]
-  },
-  "default_note_dir": {
-    "description": "笔记默认分类目录",
-    "type": "string",
-    "default": "日常随笔"
   },
   "friend_default_avatar": {
     "description": "友链默认头像（未提供头像链接时使用）",

@@ -3,7 +3,6 @@
 通过微信（个人微信 / QQ 等 IM 平台）对话，直接发布博客内容到静态博客仓库（Firefly Astro）：
 
 - **动态（moments）** —— 随手一条消息，图片自动上链
-- **笔记（notebooks）** —— 分类 + 标题 + 正文，多段自动拼接
 - **足迹（places）** —— 输入地名，坐标由高德地理编码自动获取
 - **友链（friends）** —— 键值对文本自动识别字段，一键上链
 - **相册（album）** —— 报个相册名直接发图，图片进图床 `blog/album/<相册名>`，博客动态加载
@@ -12,8 +11,9 @@
 
 ## 功能特性
 
-- ✅ 微信对话直接发布动态 / 笔记 / 足迹 / 友链 / 相册 / 影视 / 书籍 / 导航（全部命令式，2026-08 起移除 AI 抽取，纯正则解析零外部 AI 依赖）
+- ✅ 微信对话直接发布动态 / 足迹 / 友链 / 相册 / 影视 / 书籍 / 导航（全部命令式，2026-08 起移除 AI 抽取，纯正则解析零外部 AI 依赖）
 - ⛔ **账单 / 日程 / 生日 / 纪念日 与「日程提醒」已移除**（2026-10-16）：博客端同步删掉了 `bills`/`schedules` 两个集合与 `/bills`、`/schedules` 路由，插件的对应命令、正则解析、写入逻辑、向导与 APScheduler 提醒子系统（`/提醒`、`schedules_reminder.json`）一并摘除，避免「提示发布成功但站点看不到、链接 404」
+- ⛔ **笔记（notebooks）已移除**（2026-10-20）：站长要求私人笔记不再公开，博客端删掉了 `notebooks` 集合与 `/life/notebooks/` 路由（内容移至 `src/content/笔记本归档/`，在 `.gitignore` 内只留本地 Obsidian 库），插件的 `/笔记` 命令、`_start_note`、笔记本向导、`_list_notebook_names` / `_ensure_notebook_index`、`build_note_md` / `build_notebook_index_json` / `parse_note` / `note_filename` 与 `default_note_dir` 配置一并摘除——避免「发布成功但站点看不到」，更要紧的是**不能把私人笔记继续 commit 进公开仓库**
 - ✅ 动态支持图片、动图 GIF 与视频：微信视频自动下载、上传图床，URL 进动态 `images` 数组（视频仅动态支持）
 - ✅ 相册发布：新相册自动建 `src/content/相册/<名>.md`（含 `subtitle`/`imgbedFolder`，对齐博客现有格式）触发构建；已有相册（按标题/文件名判断）只传图不写文件，照片进命中相册自己的图床目录
 - ✅ 图片自动上传图床（统一上传到 `imgbed_upload_folder`，默认 `blog/moments`，与博客图床目录惯例一致）
@@ -45,7 +45,7 @@
 | github_branch | 目标分支，默认 `main` |
 | imgbed_upload_url | 图床上传地址，默认 `https://img.tsh520.cn/upload` |
 | imgbed_token | 图床 API Token（`Authorization: Bearer` 认证） |
-| imgbed_upload_folder | 图片上传目录（动态/笔记/足迹照片统一），默认 `blog/moments` |
+| imgbed_upload_folder | 图片上传目录（动态/足迹照片统一），默认 `blog/moments` |
 | album_folder_prefix | 相册图片目录前缀，默认 `blog/album`（实际目录 = 前缀 + 相册名） |
 | wx_cdn_base_url | 微信媒体 CDN 地址（图片下载兜底用），默认 `https://novac2c.cdn.weixin.qq.com/c2c` |
 | amap_key | 高德 Web 服务 Key（足迹坐标用）；留空读环境变量 `AMAP_KEY` |
@@ -58,7 +58,6 @@
 | article_upload_folder | 转载文章图片转存图床目录，默认 `blog/article` |
 | article_tags | 转载文章默认标签，默认 `["转载"]` |
 | moment_tags / place_tags | 动态/足迹默认标签，默认 `["日常"]` / `["旅游"]` |
-| default_note_dir | 笔记默认分类目录，默认 `日常随笔` |
 | friend_default_avatar | 友链默认头像（未提供头像链接时），默认 `/assets/ziyuan/tx.webp` |
 | friend_tags | 友链默认标签，默认 `["Blog"]` |
 | allow_users | 允许使用的用户 ID 列表（各平台的 ID 形态见「平台支持」；AstrBot 全局 `admins_id` 里的管理员无需重复填写）；空列表 = 全部拒绝 |
@@ -74,8 +73,6 @@
 | 命令 | 说明 |
 |---|---|
 | `/动态 今天去了公园 #日常` | 创建动态会话，可发图片 / GIF / 视频（可多发） |
-| `/笔记` | **向导**：列出 GitHub 上现有笔记本（回数字选或直接回名字新建）→ 问标题 → 发正文/图片，`/发布` 提交；新笔记本发布时自动补建 `_index.json`（否则博客书架不显示） |
-| `/笔记 日常随笔 标题` | 快捷：跳过向导直达正文（分类名会自动清洗非法字符） |
 | `/足迹 陕西 华阴市华山 去找宝宝了 #旅游` | 创建足迹会话，坐标自动获取，可发照片 |
 | `/友链` | 创建友链会话，逐行发送键值对信息自动识别 |
 | `/相册` | **向导**：列出博客现有相册（标题+文件名，回数字选）或选新建；选已有相册只追加照片 |
@@ -134,8 +131,7 @@
 - 相册追加模式不触发博客构建：详情页照片即时可见，列表页预览图在下次构建后刷新
 - 相册按标题判断是否存在（文件名与标题不一定相同，如 `xiangce1.md` 的标题是「测试相册」）；追加照片会上传到命中相册自己的图床目录
 - 图片上传按扩展名声明真实 MIME（jpg/png/webp/gif/heic/mp4…），修复早期版本图床存成 `application/octet-stream` 导致浏览器打开直接下载的问题；旧图需在图床后台改类型或重传
-- 笔记图片自 2026-09-27 起写 frontmatter `images:` 数组（对齐博客归档卡片宫格），不再往正文拼 `![](url)`
-- 笔记分类/相册名等用户输入会经文件名清洗（非法字符转 `-`），防止路径注入
+- 相册名等用户输入会经文件名清洗（非法字符转 `-`），防止路径注入
 - 命令/会话消息处理后调用 `stop_event` 阻断事件传播（符合官方规范，避免 LLM 对同一条消息重复回复）；无关消息放行不阻断
 - 插件卸载/重载时 `terminate()` 会关闭 httpx 客户端（提醒调度器已随日程功能移除）
 - 群聊不主动插嘴：白名单用户「无会话发图提示」仅在**私聊**生效；配置 `allow_groups` 后（非空），不在列表内的群完全静默（含命令）
@@ -148,7 +144,7 @@ pip install httpx pycryptodome
 python -m unittest discover -s tests
 ```
 
-139 个单元测试 + 集成冒烟测试（stub astrbot 依赖），覆盖命令解析、markdown 生成（含 YAML 边界与最新格式）、图床/高德/GitHub/TMDB/xxapi 响应解析、友链字段识别、向导全流程（笔记/相册/影视类型，含选项错位与字段跳过回归）、影视（TMDB/手动/换封面/game 落盘）与书籍全流程、导航全流程（文件夹分类 + tags）、平台兼容（企业微信/QQ 官方机器人的双白名单、未授权 ID 提示与静默边界）、消息权限与放行逻辑。
+125 个单元测试 + 集成冒烟测试（stub astrbot 依赖），覆盖命令解析、markdown 生成（含 YAML 边界与最新格式）、图床/高德/GitHub/TMDB/xxapi 响应解析、友链字段识别、向导全流程（相册/影视类型，含选项错位与字段跳过回归）、影视（TMDB/手动/换封面/game 落盘）与书籍全流程、导航全流程（文件夹分类 + tags）、平台兼容（企业微信/QQ 官方机器人的双白名单、未授权 ID 提示与静默边界）、消息权限与放行逻辑。
 
 > 2026-10-16 移除账单/日程（198 → 147）与其提醒子系统（147 → 139）后，测试共删掉 59 个相关用例。
 

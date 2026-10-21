@@ -1,11 +1,10 @@
 # -*- coding: utf-8 -*-
 """
 AstrBot BlogWriter 插件
-通过微信对话更新博客的动态（moments）、笔记（notebooks）、足迹（places）。
+通过微信对话更新博客的动态（moments）、足迹（places）。
 
 用法：
   /动态 今天去了公园            # 创建动态会话，可继续发图片/GIF/视频
-  /笔记 日常随笔 标题            # 创建笔记会话，正文由后续文本消息追加
   /足迹 陕西 华阴市华山 去找宝宝了  # 创建足迹会话（坐标由高德地理编码获取）
   /相册 情侣头像                # 创建相册会话，图片传到 blog/album/<相册名>
   /发布                      # 结束会话：上传图床 → 生成 md → 提交 GitHub
@@ -68,8 +67,6 @@ try:
         build_github_put_body,
         build_imgbed_upload,
         build_moment_md,
-        build_note_md,
-        build_notebook_index_json,
         build_place_md,
         build_upload_url,
         build_friend_md,
@@ -79,7 +76,6 @@ try:
         github_put_url,
         moment_filename,
         next_friend_index,
-        note_filename,
         parse_amap_response,
         parse_album,
         parse_album_frontmatter,
@@ -93,7 +89,6 @@ try:
         parse_github_put_response,
         parse_imgbed_response,
         parse_message,
-        parse_note,
         parse_place,
         place_filename,
         daohang_slug,
@@ -125,8 +120,6 @@ except ImportError:  # 兼容非包形式加载
         build_github_put_body,
         build_imgbed_upload,
         build_moment_md,
-        build_note_md,
-        build_notebook_index_json,
         build_place_md,
         build_upload_url,
         build_friend_md,
@@ -136,7 +129,6 @@ except ImportError:  # 兼容非包形式加载
         github_put_url,
         moment_filename,
         next_friend_index,
-        note_filename,
         parse_amap_response,
         parse_album,
         parse_album_frontmatter,
@@ -150,7 +142,6 @@ except ImportError:  # 兼容非包形式加载
         parse_github_put_response,
         parse_imgbed_response,
         parse_message,
-        parse_note,
         parse_place,
         place_filename,
         daohang_slug,
@@ -178,7 +169,7 @@ RETRY_DELAYS = (1.0, 3.0)
 @register(
     "blog_writer",
     "tianshihao2003",
-    "通过微信/QQ对话更新博客的动态、笔记、足迹、相册、友链、影视、书籍、导航（交互式向导）",
+    "通过微信/QQ对话更新博客的动态、足迹、相册、友链、影视、书籍、导航（交互式向导）",
     "v1.0.0",
 )
 class BlogWriter(Star):
@@ -365,57 +356,6 @@ class BlogWriter(Star):
         expired = [uid for uid, s in self._sessions.items() if s.expired(now)]
         for uid in expired:
             del self._sessions[uid]
-
-    # ---------- 向导辅助 ----------
-
-    async def _list_notebook_names(self, repo: str, branch: str, token: str) -> Optional[List[str]]:
-        """列出 src/content/笔记本 下的一级目录名（笔记本名）。
-
-        返回排序后的目录名列表；**请求失败返回 None**（区别于空仓库的 []，
-        发布笔记时依赖该区分决定是否补建 _index.json）。"""
-        url = "https://api.github.com/repos/{}/contents/src/content/笔记本?ref={}".format(
-            repo, urllib.parse.quote(branch)
-        )
-        headers = {
-            "Authorization": "Bearer " + token,
-            "Accept": "application/vnd.github+json",
-            "X-GitHub-Api-Version": "2022-11-28",
-        }
-        try:
-            resp = await self._get_client().get(url, headers=headers)
-            if resp.status_code != 200:
-                return None
-            import json as _json
-            items = _json.loads(resp.text)
-            names = []
-            for it in items:
-                if isinstance(it, dict) and it.get("type") == "dir":
-                    n = str(it.get("name") or "").strip()
-                    if n and not n.startswith("."):
-                        names.append(n)
-            return sorted(names)
-        except Exception as e:
-            logger.warning("BlogWriter: 列笔记本失败: %s", e)
-            return None
-
-    async def _ensure_notebook_index(self, note_dir: str, repo: str, branch: str, token: str) -> Tuple[bool, str]:
-        """笔记本不存在时补建 _index.json（博客书架/归档页靠它识别，缺了文件夹不可见）。
-
-        返回 (是否新建了索引, 错误信息)。目录列表拉取失败时不动作（返回 False, ""），
-        宁可沿用旧行为也不误判已有笔记本。"""
-        names = await self._list_notebook_names(repo, branch, token)
-        if names is None or note_dir in names:
-            return False, ""
-        idx_path = "src/content/笔记本/{}/_index.json".format(note_dir)
-        exists = await self._github_exists(repo, idx_path, branch, token)
-        if exists is not False:  # True（已存在）或 None（查询失败）都不再建
-            return False, ""
-        idx_md = build_notebook_index_json(note_dir)
-        ok, err = await self._github_put(repo, idx_path, idx_md, token, branch)
-        if not ok:
-            return False, err or "GitHub 提交失败"
-        logger.info("BlogWriter: 已补建笔记本索引 %s", idx_path)
-        return True, ""
 
     # ---------- 会话创建 ----------
 
@@ -651,7 +591,7 @@ class BlogWriter(Star):
                     if callable(_stop):
                         _stop()
                     yield event.plain_result(
-                        "当前没有进行中的会话，图片/视频未接收。请先发 /动态、/笔记、/足迹、/相册 等命令。"
+                        "当前没有进行中的会话，图片/视频未接收。请先发 /动态、/足迹、/相册 等命令。"
                     )
                     return
                 return
@@ -668,9 +608,6 @@ class BlogWriter(Star):
 
             if cmd == "动态":
                 yield self._start_moment(event, user_id, args)
-                return
-            if cmd == "笔记":
-                yield await self._start_note(event, user_id, args)
                 return
             if cmd == "足迹":
                 yield self._start_place(event, user_id, args)
@@ -721,7 +658,7 @@ class BlogWriter(Star):
                     yield event.plain_result("上一个会话已超时作废，请重新发指令。")
                     return
                 # 影视/书籍：先一次性探测封面图（避免向导拦截图片、避免重复提取日志）
-                allow_video = session.kind == "moment"  # 视频仅动态支持；笔记/足迹/相册仍只收图片
+                allow_video = session.kind == "moment"  # 视频仅动态支持；足迹/相册仍只收图片
                 cover_payload = None
                 if session.kind in ("media", "book"):
                     cover_refs = self._extract_images(event, allow_video=False)
@@ -921,41 +858,6 @@ class BlogWriter(Star):
             "动态已创建：{}{}\n\n可以直接发图片、动图 GIF 或视频（可多发），发完说 /发布。".format(content, tag_hint)
         )
 
-    async def _start_note(self, event: AstrMessageEvent, user_id: str, args: List[str]):
-        default_dir = self._cfg("default_note_dir") or "日常随笔"
-        # 带参快车道：/笔记 分类 标题（分类名清洗，防路径注入）
-        if args:
-            note_dir, title = parse_note(args, default_dir)
-            if title:
-                note_dir = clean_filename_part(note_dir, fallback=default_dir)
-                self._sessions[user_id] = Session("note", {"note_dir": note_dir, "title": title})
-                return event.plain_result(
-                    "笔记已创建：分类「{}」标题「{}」。\n\n接下来直接发正文（可多条，自动拼接），也可以发图片，发完说 /发布。".format(
-                        note_dir, title
-                    )
-                )
-        # 空参进向导：先选笔记本
-        repo = self._cfg("github_repo") or "tianshihao2003/dumplingandcakeblog"
-        branch = self._cfg("github_branch") or "main"
-        token = (self._cfg("github_token") or "").strip()
-        names = await self._list_notebook_names(repo, branch, token)
-        if not names:
-            names = [default_dir]
-        # 去重并把默认放首位
-        uniq = []
-        seen = set()
-        for n in [default_dir] + names:
-            if n not in seen:
-                seen.add(n)
-                uniq.append(n)
-        sess = Session("note", {"note_dir": "", "title": ""})
-        sess.wizard = {"step": "note_pick_notebook", "notebooks": uniq, "default_dir": default_dir}
-        self._sessions[user_id] = sess
-        return event.plain_result(
-            format_choices("请选择笔记本：", uniq, extra=["新建笔记本"], with_skip_cancel=False)
-            + "\n\n也可直接回复笔记本名称新建。"
-        )
-
     def _start_friend(self, event: AstrMessageEvent, user_id: str, raw: str):
         """/友链 [键值对文本]。后续文本消息继续追加解析。"""
         rest = re.sub(r"^/?(友链)\s*", "", raw or "", count=1).strip()
@@ -1125,7 +1027,7 @@ class BlogWriter(Star):
     async def _publish(self, event: AstrMessageEvent, user_id: str) -> MessageEventResult:
         session = self._session(user_id)
         if not session:
-            return event.plain_result("当前没有进行中的会话，请先发 /动态、/笔记、/足迹、/友链、/相册、/影视、/书籍 或 /导航。")
+            return event.plain_result("当前没有进行中的会话，请先发 /动态、/足迹、/友链、/相册、/影视、/书籍 或 /导航。")
         repo = self._cfg("github_repo") or "tianshihao2003/dumplingandcakeblog"
         branch = self._cfg("github_branch") or "main"
         token = (self._cfg("github_token") or "").strip()
@@ -1135,8 +1037,6 @@ class BlogWriter(Star):
             content = ((session.meta.get("content") or "") + "\n\n" + session.full_text()).strip()
             if not content:
                 return event.plain_result("动态内容为空，无法发布。")
-        elif session.kind == "note" and not session.full_text():
-            return event.plain_result("笔记正文为空，无法发布。")
         elif session.kind == "friend":
             ok, err = validate_friend_data(session.meta)
             if not ok:
@@ -1200,22 +1100,6 @@ class BlogWriter(Star):
                 )
                 path = "src/content/动态/{}.md".format(moment_filename(now))
                 link = "/moments/{}".format(moment_filename(now))
-            elif session.kind == "note":
-                md = build_note_md(
-                    session.meta.get("title", ""),
-                    session.full_text(),
-                    image_urls,
-                    now,
-                )
-                note_dir = clean_filename_part(session.meta.get("note_dir") or "日常随笔", fallback="日常随笔")
-                # 新笔记本先补 _index.json（博客书架/归档靠它识别，缺了文件夹不可见）
-                index_created = False
-                ok_idx, err_idx = await self._ensure_notebook_index(note_dir, repo, branch, token)
-                if not ok_idx and err_idx:
-                    return event.plain_result("新笔记本 _index.json 创建失败：{}，已中止发布（避免出现不可见笔记）。".format(err_idx))
-                index_created = ok_idx
-                path = "src/content/笔记本/{}/{}.md".format(note_dir, note_filename(now))
-                link = "/笔记本/{}/{}".format(note_dir, note_filename(now))
             elif session.kind == "friend":
                 friend_index = await self._github_list_dir_index(
                     "src/content/友链", repo, branch, token
@@ -1343,12 +1227,9 @@ class BlogWriter(Star):
             return event.plain_result("GitHub 提交失败：{}".format(err))
 
         self._sessions.pop(user_id, None)
-        created_hint = "\n🎉 已新建笔记本「{}」（含 _index.json）".format(
-            clean_filename_part(session.meta.get("note_dir") or "日常随笔", fallback="日常随笔")
-        ) if session.kind == "note" and index_created else ""
         return event.plain_result(
-            "发布成功 ✅\n\n文件：{}\n博客：https://blog.tsh520.cn{}{}".format(
-                final_path, link, created_hint
+            "发布成功 ✅\n\n文件：{}\n博客：https://blog.tsh520.cn{}".format(
+                final_path, link
             )
         )
 
@@ -1820,57 +1701,6 @@ class BlogWriter(Star):
             self._sessions.pop(user_id, None)
             return event.plain_result("已取消当前会话。")
 
-        # ---- 笔记向导 ----
-        if step == "note_pick_notebook":
-            notebooks = sess.wizard.get("notebooks", [])
-            n = len(notebooks)
-            total = n + 1  # 含新建
-            choice = parse_choice(text, total)
-            if choice is not None:
-                if choice == total:  # 新建
-                    sess.wizard = {"step": "note_input_new_notebook", "notebooks": notebooks, "default_dir": sess.wizard.get("default_dir")}
-                    return event.plain_result("请输入新笔记本名称（将作为文件夹名，非法字符会自动替换为 -）：")
-                else:
-                    picked = notebooks[choice - 1]
-                    sess.meta["note_dir"] = picked
-                    sess.wizard = {"step": "note_input_title", "note_dir": picked}
-                    sess.touch()
-                    return event.plain_result(f"已选笔记本「{picked}」。\n请输入笔记标题：")
-            # 非数字：当作新建名直接处理（存清洗后的名字，防路径注入）
-            if text and len(text) <= 30:
-                chk = clean_filename_part(text, fallback="")
-                if not chk:
-                    return event.plain_result("名称无效，请重发（1-30字，避免特殊符号）。或回复数字选择。")
-                if chk in notebooks:
-                    sess.meta["note_dir"] = chk
-                    sess.wizard = {"step": "note_input_title", "note_dir": chk}
-                    sess.touch()
-                    return event.plain_result(f"已选笔记本「{chk}」。\n请输入笔记标题：")
-                sess.meta["note_dir"] = chk
-                sess.wizard = {"step": "note_input_title", "note_dir": chk}
-                sess.touch()
-                return event.plain_result(f"已创建笔记本「{chk}」。\n请输入笔记标题：")
-            return event.plain_result("请回复数字选择，或直接发新笔记本名称。\n" + format_choices("请选择笔记本：", notebooks, extra=["新建笔记本"], with_skip_cancel=False))
-
-        if step == "note_input_new_notebook":
-            chk = clean_filename_part(text, fallback="")
-            if not chk:
-                return event.plain_result("名称无效，请重发。")
-            sess.meta["note_dir"] = chk
-            sess.wizard = {"step": "note_input_title", "note_dir": chk}
-            sess.touch()
-            return event.plain_result(f"已选笔记本「{chk}」。\n请输入笔记标题：")
-
-        if step == "note_input_title":
-            if not text:
-                return event.plain_result("标题不能为空，请重发笔记标题：")
-            sess.meta["title"] = text.strip()
-            sess.wizard = None
-            sess.touch()
-            return event.plain_result(
-                f"笔记已创建：分类「{sess.meta['note_dir']}」标题「{text.strip()}」。\n\n接下来直接发正文（可多条，自动拼接），也可以发图片，发完说 /发布。"
-            )
-
         # ---- 相册向导 ----
         if step == "album_pick":
             titles = sess.wizard.get("titles", [])
@@ -2048,8 +1878,6 @@ class BlogWriter(Star):
             "———— ✍ 发内容 ————\n"
             "/动态 内容 #标签\n"
             "　可发图片、GIF、视频\n"
-            "/笔记 [分类] 标题\n"
-            "　空参会让你选笔记本/输标题\n"
             "/足迹 省 地点 体验\n"
             "　坐标自动获取，可发照片\n"
             "/友链\n"

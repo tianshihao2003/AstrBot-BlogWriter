@@ -6,11 +6,9 @@
 
 ## 1. 目标
 
-通过个人微信与 AstrBot 对话，更新博客（tianshihao2003/dumplingandcakeblog，Firefly Astro）的三种内容：
+通过个人微信与 AstrBot 对话，更新博客（tianshihao2003/dumplingandcakeblog，Firefly Astro）的多种内容（动态 / 足迹 / 相册 / 友链 / 影视 / 书籍 / 导航 / 转载）。
 
-- 动态（moments）
-- 笔记（notebooks）
-- 足迹（places）
+> 笔记（notebooks）已于 2026-10-20 移除：站长要求私人笔记不再公开，博客端摘除了 notebooks 集合与 /life/notebooks/ 路由。
 
 图片自动上传到 CloudFlare-ImgBed 图床，正文/元数据按博客 zod schema 生成 markdown，通过 GitHub API 提交 main 分支，触发 Actions 构建与 EdgeOne Pages 部署。
 
@@ -18,7 +16,7 @@
 
 ```
 个人微信 → AstrBot(腾讯云) → BlogWriter 插件
-  ├─ 命令解析（/动态 /笔记 /足迹 /发布 /取消）
+  ├─ 命令解析（/动态 /足迹 /相册 /发布 /取消）
   ├─ 会话状态机（收集正文与图片）
   ├─ 图床上传 POST {imgbed_upload_url}（multipart field=file, header API_TOKEN）
   ├─ 足迹坐标：高德地理编码 https://restapi.amap.com/v3/geocode/geo
@@ -31,7 +29,6 @@
 | 命令 | 格式 | 行为 |
 |---|---|---|
 | /动态 | `/动态 今天去了公园` | 创建会话，可发图片/GIF/视频（可多发） |
-| /笔记 | `/笔记 日常随笔 标题` | 正文由后续文本消息追加，直到 /发布 |
 | /足迹 | `/足迹 陕西 华阴市华山 去找宝宝了` | 省 地点 体验；坐标由高德 geocode（省+地点）获取 |
 | /相册 | `/相册 情侣头像` | 创建相册会话，图片传图床目录；按 title/文件名判断已存在则只追加照片 |
 | 图片消息 | 无命令直接发 | 归入当前会话（仅在会话激活时消费；视频仅动态会话接收） |
@@ -45,8 +42,8 @@
 - 同一用户同时只允许一个会话
 - 非白名单用户一律拒绝（回复「无权限」）
 - 其他命令/普通消息不消费，放行给其他插件或 AI
-- 缺省规则：`/动态` 无正文 → 报错提示；`/笔记 标题`（一个参数）→ 分类用默认目录，标题=该参数；`/足迹` 参数不足 → 报错
-- 图片落位：动态 → frontmatter `images` 数组；笔记 → 正文末尾 `![](url)`；足迹 → photos 列表
+- 缺省规则：`/动态` 无正文 → 报错提示；`/足迹` 参数不足 → 报错
+- 图片落位：动态 → frontmatter `images` 数组；足迹 → photos 列表
 
 ## 4. 文件生成规则（对齐现有数据）
 
@@ -65,19 +62,6 @@ images:
 ```
 
 > 2026-08-13 起不再写 `author`/`avatar`（博客 schema 已提供默认值 `团子和蛋糕`、`/assets/ziyuan/tx.webp`）。图片放 frontmatter `images` 数组，正文只放文字。
-
-### 笔记 → `src/content/笔记本/<分类>/2026年8月8日[-N].md`
-
-```yaml
----
-date: 2026-08-08
-name: 标题
----
-
-正文
-```
-
-分类来自 `/笔记` 第一个参数；默认 `日常随笔`（配置 default_note_dir）。
 
 ### 足迹 → `src/content/足迹/YYYY-MM-DD[-N].md`
 
@@ -144,12 +128,11 @@ imgbedFolder: blog/album/情侣头像
 | github_branch | 目标分支 | main |
 | imgbed_upload_url | 图床上传地址 | https://img.tsh520.cn/upload |
 | imgbed_token | 图床 API_TOKEN | 空 |
-| imgbed_upload_folder | 图片上传目录（动态/笔记/足迹照片统一，2026-08-13 起） | blog/moments |
+| imgbed_upload_folder | 图片上传目录（动态/足迹照片统一，2026-08-13 起） | blog/moments |
 | album_folder_prefix | 相册图片目录前缀（实际目录 = 前缀 + 相册名） | blog/album |
 | amap_key | 高德 Web 服务 key | 空 |
 | moment_tags | 动态默认 tags | ["日常"] |
 | place_tags | 足迹默认 tags | ["旅游"] |
-| default_note_dir | 笔记默认分类目录 | 日常随笔 |
 | allow_users | 允许使用的用户 ID 列表（个人微信为 wxid）；空 = 全部拒绝 | [] |
 
 配置通过 `__init__(self, context, config)` 注入（官方新版配置系统，`get_config()` 已过时）。
