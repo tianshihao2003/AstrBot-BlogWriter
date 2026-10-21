@@ -22,7 +22,7 @@ def now_shanghai() -> datetime:
 SESSION_TIMEOUT = timedelta(minutes=30)
 MAX_PATH_SUFFIX = 10
 
-COMMANDS = ("动态", "笔记", "足迹", "友链", "相册", "影视", "书籍", "导航", "转载", "发布", "取消", "状态", "帮助")
+COMMANDS = ("动态", "足迹", "友链", "相册", "影视", "书籍", "导航", "转载", "发布", "取消", "状态", "帮助")
 
 # ---------- 命令解析 ----------
 
@@ -50,15 +50,6 @@ def parse_dynamic(args: List[str]) -> Tuple[Optional[str], List[str]]:
         return None, []
     clean, tags = extract_tags(content)
     return (clean or None), tags
-
-
-def parse_note(args: List[str], default_dir: str) -> Tuple[str, str]:
-    """/笔记 [分类] 标题 → (分类, 标题)。一个参数时分类用默认。"""
-    if len(args) >= 2:
-        return args[0].strip(), " ".join(args[1:]).strip()
-    if len(args) == 1:
-        return default_dir, args[0].strip()
-    return default_dir, ""
 
 
 def parse_place(args: List[str]) -> Tuple[str, str, str, List[str]]:
@@ -132,11 +123,6 @@ def moment_filename(day: datetime) -> str:
     return day.strftime("%Y-%m-%d")
 
 
-def note_filename(day: datetime) -> str:
-    # 对齐现有数据：2026年6月1日（无补零）
-    return "{}年{}月{}日".format(day.year, day.month, day.day)
-
-
 def place_filename(day: datetime) -> str:
     return day.strftime("%Y-%m-%d")
 
@@ -159,7 +145,7 @@ def _dump_yaml(
     """生成 YAML frontmatter（仅支持本项目用到的简单类型）。
 
     - quote_all=True：所有字符串值强制双引号（date/datetime 形态除外），
-      对齐博客 地点/笔记本 等最新文件风格（PagesCMS 生成格式）。
+      对齐博客 地点/相册 等最新文件风格（PagesCMS 生成格式）。
     - quote_keys：仅指定 key 强制双引号（quote_all 的按 key 版本）。
     - inline_keys：指定 key 的非空列表输出行内数组（如 tags: ["a", "b"]）。
     """
@@ -240,35 +226,25 @@ def build_moment_md(
     tags: List[str],
     now: datetime = None,
 ) -> str:
-    """对齐现有 moments 格式：图片在 frontmatter 的 images 数组，正文只放文字。
+    """对齐现有 moments 格式：图片写进**正文**（标准 Markdown 图片语法），frontmatter 只留 published/tags。
 
     2026-08-13 起博客不再按条写 author/avatar（content.config.ts 已提供 schema 默认值，
     全部旧文件已清理），故这里不再生成这两个字段。
+
+    2026-10-21 起图片从 frontmatter 的 images 数组迁到正文：目的是让 Obsidian 打开 md
+    时也能直接看到图。博客渲染侧（MomentCard）会从正文提取图片做九宫格 / 视频区，
+    所以这里保持「空 alt」的 ![](url) 写法——非空 alt 会被 rehype-figure 包成 figure+figcaption。
     """
     now = now or now_shanghai()
     fm = {
         "published": format_moment_published(now),
         "tags": tags,
     }
-    if image_urls:
-        fm["images"] = list(image_urls)
-    return _dump_yaml(fm) + "\n\n" + content.strip() + "\n"
-
-
-def build_note_md(name: str, content: str, image_urls: List[str], day: datetime = None) -> str:
-    """对齐最新 notebooks 格式（2026-09-27）：图片进 frontmatter images 数组，正文只留文字，对齐 moments。"""
-    day = day or now_shanghai()
-    fm: Dict[str, Any] = {"date": day.strftime("%Y-%m-%d"), "name": name}
-    if image_urls:
-        fm["images"] = list(image_urls)
-    body = content.strip()
+    body = (content or "").strip()
+    image_lines = ["![]({})".format(url) for url in image_urls if url]
+    if image_lines:
+        body = "{}\n\n{}".format(body, "\n".join(image_lines)) if body else "\n".join(image_lines)
     return _dump_yaml(fm) + "\n\n" + body + "\n"
-
-
-def build_notebook_index_json(name: str) -> str:
-    """新建笔记本时生成 _index.json（博客书架/归档页靠它识别笔记本，缺了整个文件夹不可见）。
-    对齐现有文件风格：tab 缩进、中文字符不转义；封面留空由博客显示默认 emoji，用户可后续在 CMS 补。"""
-    return json.dumps({"name": name}, ensure_ascii=False, indent="\t") + "\n"
 
 
 def build_place_md(
@@ -1125,7 +1101,12 @@ def parse_friend_text(text: str) -> Dict[str, str]:
         elif line.startswith("/"):
             result.setdefault("imgurl", line)
         else:
-            result.setdefault("title", line)
+            # 无键名且非链接：第一行当站点名称，第二行当站点描述
+            # （博客友链申请区 2026-10-21 起输出「名称/描述/链接/头像」纯四行、不带键名前缀）
+            if "title" not in result:
+                result["title"] = line
+            elif "desc" not in result:
+                result["desc"] = line
     return result
 
 
@@ -1239,7 +1220,7 @@ def parse_choice(text: str, n: int) -> Optional[int]:
 
 
 def format_choices(title: str, items: List[str], extra: Optional[List[str]] = None, with_skip_cancel: bool = True) -> str:
-    """生成编号选择文本。items 为选项列表，extra 追加到末尾（如 ['新建笔记本']）。"""
+    """生成编号选择文本。items 为选项列表，extra 追加到末尾（如 ['新建相册']）。"""
     lines = [title]
     for idx, item in enumerate(items, 1):
         lines.append(f"{idx}. {item}")

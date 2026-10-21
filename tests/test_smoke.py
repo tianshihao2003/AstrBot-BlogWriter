@@ -151,9 +151,6 @@ class TestFlow(unittest.TestCase):
             async def _geocode(self, address):
                 return (34.477861, 110.084789)
 
-            async def _list_notebook_names(self, repo, branch, token):
-                return ["日常随笔"]
-
             async def _commit_md(self, path, md, now):
                 self.committed.append((path, md))
                 return True, path, ""
@@ -200,7 +197,7 @@ class TestFlow(unittest.TestCase):
         path, md = self.plugin.committed[0]
         self.assertTrue(path.startswith("src/content/动态/"))
         self.assertIn("今天去了公园", md)
-        self.assertIn("blogwriter_test.png", md)  # 图片进 frontmatter images 数组
+        self.assertIn("![](https://img.tsh520.cn/file/blogwriter_test.png)", md)  # 图片以正文 Markdown 语法写入
         self.assertNotIn("id: ext-", md)
         # 2026-08-13 起不再按条写 author/avatar；图片统一上传到 imgbed_upload_folder（默认 blog/moments）
         self.assertNotIn("author:", md)
@@ -208,17 +205,6 @@ class TestFlow(unittest.TestCase):
         self.assertEqual(self.plugin.last_upload_folder, "blog/moments")
         self.assertEqual(len(self.plugin._sessions), 0)
         tmp.unlink(missing_ok=True)
-
-    def test_note_full_flow(self):
-        asyncio.get_event_loop().run_until_complete(self._send("/笔记 日常随笔 标题"))
-        asyncio.get_event_loop().run_until_complete(self._send("第一段正文"))
-        asyncio.get_event_loop().run_until_complete(self._send("第二段正文"))
-        replies = asyncio.get_event_loop().run_until_complete(self._send("/发布"))
-        self.assertIn("发布成功", replies[0])
-        path, md = self.plugin.committed[0]
-        self.assertTrue(path.startswith("src/content/笔记本/日常随笔/"))
-        self.assertIn("name: 标题", md)
-        self.assertIn("第一段正文\n第二段正文", md)
 
     def test_moment_full_flow_with_tags(self):
         """自定义标签：默认标签 + # 标签合并去重。"""
@@ -266,11 +252,11 @@ class TestFlow(unittest.TestCase):
         replies = asyncio.get_event_loop().run_until_complete(self._send("/发布"))
         self.assertIn("发布成功", replies[0])
         path, md = self.plugin.committed[0]
-        self.assertIn("images:", md)
-        self.assertIn("https://img.tsh520.cn/file/wxraw_ENCPARAM123", md)
+        self.assertNotIn("images:", md)
+        self.assertIn("![](https://img.tsh520.cn/file/wxraw_ENCPARAM123)", md)
 
     def test_moment_video_flow(self):
-        """动态可发视频：Video 组件（本地 .mp4）→ 上传图床 → URL 进 images 数组。"""
+        """动态可发视频：Video 组件（本地 .mp4）→ 上传图床 → URL 以 Markdown 图片语法进正文。"""
         tmp = Path(os.environ.get("TEMP", ".")) / "blogwriter_video.mp4"
         tmp.write_bytes(b"fake-video-bytes")
 
@@ -285,12 +271,12 @@ class TestFlow(unittest.TestCase):
         replies = asyncio.get_event_loop().run_until_complete(self._send("/发布"))
         self.assertIn("发布成功", replies[0])
         path, md = self.plugin.committed[0]
-        self.assertIn("  - https://img.tsh520.cn/file/blogwriter_video.mp4", md)
+        self.assertIn("![](https://img.tsh520.cn/file/blogwriter_video.mp4)", md)
         self.assertEqual(self.plugin.last_upload_folder, "blog/moments")
         tmp.unlink(missing_ok=True)
 
     def test_moment_gif_flow(self):
-        """动态发 GIF 动图：Image 组件 .gif → images 数组保留 .gif。"""
+        """动态发 GIF 动图：Image 组件 .gif → 正文保留 .gif（由渲染层按扩展名分流）。"""
         from astrbot.api.message_components import Image
 
         tmp = Path(os.environ.get("TEMP", ".")) / "blogwriter_gif.gif"
@@ -304,23 +290,7 @@ class TestFlow(unittest.TestCase):
         replies = asyncio.get_event_loop().run_until_complete(self._send("/发布"))
         self.assertIn("发布成功", replies[0])
         path, md = self.plugin.committed[0]
-        self.assertIn("  - https://img.tsh520.cn/file/blogwriter_gif.gif", md)
-        tmp.unlink(missing_ok=True)
-
-    def test_note_rejects_video(self):
-        """视频仅动态支持：笔记会话收到视频组件应被忽略（不误收）。"""
-        tmp = Path(os.environ.get("TEMP", ".")) / "blogwriter_video2.mp4"
-        tmp.write_bytes(b"fake-video-bytes")
-
-        video_comp = types.SimpleNamespace(
-            type="Video", url="", file="file://" + str(tmp), path=str(tmp)
-        )
-        asyncio.get_event_loop().run_until_complete(self._send("/笔记 日常随笔 标题"))
-        replies = asyncio.get_event_loop().run_until_complete(
-            self._send("", messages=[video_comp])
-        )
-        self.assertEqual(len(replies), 0)  # 未识别为媒体，放行
-        self.assertEqual(len(self.plugin._sessions["u1"].images), 0)
+        self.assertIn("![](https://img.tsh520.cn/file/blogwriter_gif.gif)", md)
         tmp.unlink(missing_ok=True)
 
     def test_wx_raw_video_fallback_flow(self):
@@ -1147,9 +1117,6 @@ class TestWizardFlow(unittest.TestCase):
             async def _album_index(self, repo, branch, token):
                 return self.album_index_result
 
-            async def _list_notebook_names(self, repo, branch, token):
-                return ["日常随笔", "喜马拉雅"]
-
             async def _geocode(self, address):
                 return (34.477, 110.084)
 
@@ -1176,24 +1143,6 @@ class TestWizardFlow(unittest.TestCase):
         async for r in self.plugin.on_message(ev):
             out.append(r)
         return [o.text for o in out]
-
-    def test_note_wizard_pick_and_title(self):
-        # /笔记 空参 → 选笔记本 → 输标题 → 发正文 → 发布
-        replies = asyncio.get_event_loop().run_until_complete(self._send("/笔记"))
-        self.assertTrue(any("请选择笔记本" in r for r in replies))
-        replies = asyncio.get_event_loop().run_until_complete(self._send("1"))
-        self.assertTrue(any("标题" in r for r in replies))
-        replies = asyncio.get_event_loop().run_until_complete(self._send("我的新标题"))
-        self.assertTrue(any("笔记已创建" in r for r in replies))
-        sess = self.plugin._sessions.get("u1")
-        self.assertEqual(sess.meta.get("note_dir"), "日常随笔")
-        self.assertEqual(sess.meta.get("title"), "我的新标题")
-
-    def test_note_wizard_cancel(self):
-        asyncio.get_event_loop().run_until_complete(self._send("/笔记"))
-        replies = asyncio.get_event_loop().run_until_complete(self._send("取消"))
-        self.assertTrue(any("已取消" in r for r in replies))
-        self.assertNotIn("u1", self.plugin._sessions)
 
     def test_album_wizard_pick_existing(self):
         self.plugin.album_index_result = {
@@ -1269,65 +1218,6 @@ class TestWizardFlow(unittest.TestCase):
         finally:
             tmp.unlink(missing_ok=True)
 
-    def test_note_wizard_cleans_dir_name(self):
-        # 笔记向导输入带路径符号的名称 → 存清洗后的名字（防路径注入）
-        asyncio.get_event_loop().run_until_complete(self._send("/笔记"))
-        replies = asyncio.get_event_loop().run_until_complete(self._send("../坏/名字"))
-        self.assertTrue(any("标题" in r for r in replies))
-        sess = self.plugin._sessions.get("u1")
-        self.assertNotIn("..", sess.meta.get("note_dir", ""))
-        self.assertNotIn("/", sess.meta.get("note_dir", ""))
-
-    def test_note_publish_creates_index_for_new_notebook(self):
-        # 全新笔记本发布：先补建 _index.json 再发笔记，成功提示含“已新建笔记本”
-        puts = []
-
-        async def fake_exists(repo, path, branch, token):
-            return False  # 目标不存在 → 允许创建
-
-        async def fake_put(repo, path, md, token, branch):
-            puts.append((path, md))
-            return True, ""
-
-        self.plugin._github_exists = fake_exists
-        self.plugin._github_put = fake_put
-
-        asyncio.get_event_loop().run_until_complete(self._send("/笔记"))
-        asyncio.get_event_loop().run_until_complete(self._send("全新笔记本"))
-        asyncio.get_event_loop().run_until_complete(self._send("标题一"))
-        asyncio.get_event_loop().run_until_complete(self._send("正文内容"))
-        replies = asyncio.get_event_loop().run_until_complete(self._send("/发布"))
-        self.assertTrue(any("发布成功" in r for r in replies))
-        self.assertTrue(any("已新建笔记本" in r for r in replies))
-        # 索引先于笔记提交，路径与内容正确
-        self.assertEqual(len(puts), 1)
-        idx_path, idx_md = puts[0]
-        self.assertEqual(idx_path, "src/content/笔记本/全新笔记本/_index.json")
-        self.assertIn("全新笔记本", idx_md)
-        self.assertEqual(len(self.plugin.committed), 1)
-        note_path, note_md = self.plugin.committed[0]
-        self.assertTrue(note_path.startswith("src/content/笔记本/全新笔记本/"))
-        self.assertIn("正文内容", note_md)
-
-    def test_note_publish_existing_notebook_no_index(self):
-        # 已有笔记本发布：不补建索引、成功提示不含“已新建笔记本”
-        puts = []
-
-        async def fake_put(repo, path, md, token, branch):
-            puts.append((path, md))
-            return True, ""
-
-        self.plugin._github_put = fake_put
-        asyncio.get_event_loop().run_until_complete(self._send("/笔记"))
-        asyncio.get_event_loop().run_until_complete(self._send("1"))  # 日常随笔（stub 列表已含）
-        asyncio.get_event_loop().run_until_complete(self._send("标题二"))
-        asyncio.get_event_loop().run_until_complete(self._send("正文二"))
-        replies = asyncio.get_event_loop().run_until_complete(self._send("/发布"))
-        self.assertTrue(any("发布成功" in r for r in replies))
-        self.assertFalse(any("已新建笔记本" in r for r in replies))
-        self.assertEqual(len(puts), 0)  # 无索引提交
-        self.assertEqual(len(self.plugin.committed), 1)
-
     def test_media_wizard_category(self):
         # 模拟手动模式已发图后进入选类型
         from blog_writer_core import Session
@@ -1346,8 +1236,8 @@ class TestWizardFlow(unittest.TestCase):
 
     def test_fast_track_still_works(self):
         # 带参快车道不受影响
-        replies = asyncio.get_event_loop().run_until_complete(self._send("/笔记 日常随笔 快捷标题"))
-        self.assertTrue(any("笔记已创建" in r for r in replies))
+        replies = asyncio.get_event_loop().run_until_complete(self._send("/动态 快捷内容"))
+        self.assertTrue(any("动态已创建" in r for r in replies))
         self.assertIsNone(self.plugin._sessions["u1"].wizard)
 
 

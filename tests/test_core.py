@@ -16,7 +16,6 @@ from blog_writer_core import (  # noqa: E402
     build_github_put_body,
     build_imgbed_upload,
     build_moment_md,
-    build_note_md,
     build_place_md,
     build_upload_url,
     build_friend_md,
@@ -26,7 +25,6 @@ from blog_writer_core import (  # noqa: E402
     gen_moment_id,
     moment_filename,
     next_friend_index,
-    note_filename,
     parse_album,
     parse_album_frontmatter,
     parse_amap_response,
@@ -35,7 +33,6 @@ from blog_writer_core import (  # noqa: E402
     parse_github_put_response,
     parse_imgbed_response,
     parse_message,
-    parse_note,
     parse_place,
     place_filename,
     upload_base_host,
@@ -67,9 +64,9 @@ class TestParseMessage(unittest.TestCase):
         self.assertIsNone(parse_message("   ")[0])
 
     def test_multi_space(self):
-        cmd, args, _ = parse_message("/笔记 日常随笔 我的标题")
-        self.assertEqual(cmd, "笔记")
-        self.assertEqual(args, ["日常随笔", "我的标题"])
+        cmd, args, _ = parse_message("/动态 今天 去了公园")
+        self.assertEqual(cmd, "动态")
+        self.assertEqual(args, ["今天", "去了公园"])
 
     def test_album_command(self):
         cmd, args, _ = parse_message("/相册 情侣头像")
@@ -122,18 +119,6 @@ class TestParseArgs(unittest.TestCase):
         self.assertEqual(parse_dynamic([]), (None, []))
         self.assertEqual(parse_dynamic(["  "]), (None, []))
 
-    def test_note_two_args(self):
-        self.assertEqual(parse_note(["日常随笔", "标题"], "默认"), ("日常随笔", "标题"))
-
-    def test_note_one_arg_uses_default_dir(self):
-        self.assertEqual(parse_note(["标题"], "日常随笔"), ("日常随笔", "标题"))
-
-    def test_note_multi_word_title(self):
-        self.assertEqual(parse_note(["每日总结", "今天", "很好"], "默认"), ("每日总结", "今天 很好"))
-
-    def test_note_no_args(self):
-        self.assertEqual(parse_note([], "默认"), ("默认", ""))
-
     def test_place(self):
         self.assertEqual(parse_place(["陕西", "华阴市华山", "去找宝宝了"]), ("陕西", "华阴市华山", "去找宝宝了", []))
 
@@ -171,8 +156,6 @@ class TestNaming(unittest.TestCase):
     def test_filenames(self):
         day = datetime(2026, 8, 8)
         self.assertEqual(moment_filename(day), "2026-08-08")
-        self.assertEqual(note_filename(day), "2026年8月8日")
-        self.assertEqual(note_filename(datetime(2026, 6, 1)), "2026年6月1日")
         self.assertEqual(place_filename(day), "2026-08-08")
 
     def test_with_suffix(self):
@@ -194,9 +177,9 @@ class TestMarkdown(unittest.TestCase):
         # 2026-08-13 起博客不再按条写 author/avatar（schema 提供默认值）
         self.assertNotIn("author:", md)
         self.assertNotIn("avatar:", md)
-        # 图片在 frontmatter 的 images 数组（URL 裸写，对齐现有风格），正文只有文字
-        self.assertIn("images:", md)
-        self.assertIn("  - https://img.tsh520.cn/file/a.jpg", md)
+        # 2026-10-21 起图片写进正文（空 alt 的 Markdown 图片语法），frontmatter 只剩 published/tags
+        self.assertNotIn("images:", md)
+        self.assertIn("![](https://img.tsh520.cn/file/a.jpg)", md)
         self.assertNotIn("![a.jpg]", md)
         self.assertIn("今天去了公园", md)
         if yaml:
@@ -204,37 +187,21 @@ class TestMarkdown(unittest.TestCase):
             self.assertNotIn("author", fm)
             self.assertNotIn("avatar", fm)
             self.assertEqual(fm["tags"], ["日常"])
-            self.assertEqual(fm["images"], ["https://img.tsh520.cn/file/a.jpg"])
+            self.assertEqual(fm.get("images"), None)
             self.assertNotIn("id", fm)
             self.assertIn("published", fm)
+        # 图片跟在正文之后，且行数正确
+        self.assertIn("今天去了公园\n\n![](https://img.tsh520.cn/file/a.jpg)\n", md)
 
     def test_moment_md_no_images(self):
         md = build_moment_md("纯文字动态", [], ["日常"])
         self.assertNotIn("images:", md)
+        self.assertNotIn("![](", md)
         self.assertNotIn("author:", md)
         self.assertNotIn("avatar:", md)
         if yaml:
             fm = yaml.safe_load(md.split("---")[1])
             self.assertEqual(fm.get("images"), None)
-
-    def test_note_md(self):
-        md = build_note_md("标题", "正文第一行\n第二行", [], datetime(2026, 8, 8))
-        if yaml:
-            fm = yaml.safe_load(md.split("---")[1])
-            self.assertEqual(fm["name"], "标题")
-            # js-yaml（Astro 用）会把 2026-08-08 当字符串；PyYAML 会解析成 date 对象，两者皆可
-            self.assertTrue(fm["date"] == "2026-08-08" or fm["date"] == datetime(2026, 8, 8).date())
-            self.assertNotIn("images", fm)
-        self.assertIn("正文第一行\n第二行", md)
-        self.assertNotIn("![]", md)
-
-    def test_note_md_with_images(self):
-        md = build_note_md("标题", "正文", ["https://img.tsh520.cn/file/a.jpg", "https://img.tsh520.cn/file/b.jpg"], datetime(2026, 8, 8))
-        if yaml:
-            fm = yaml.safe_load(md.split("---")[1])
-            self.assertEqual(fm["images"], ["https://img.tsh520.cn/file/a.jpg", "https://img.tsh520.cn/file/b.jpg"])
-        self.assertIn("  - https://img.tsh520.cn/file/a.jpg", md)
-        self.assertNotIn("![", md)
 
     def test_place_md(self):
         md = build_place_md("陕西", "华阴市华山", "去找宝宝了", ["https://img.tsh520.cn/file/places/x.jpg"], 34.477861, 110.084789, ["旅游"], datetime(2026, 8, 8))
@@ -278,10 +245,10 @@ class TestMarkdown(unittest.TestCase):
 
     def test_yaml_quoting(self):
         # 含特殊字符的标题必须被正确引用，YAML 可解析
-        md = build_note_md("标题: 带冒号", "正文", [], datetime(2026, 8, 8))
+        md = build_album_md("标题: 带冒号", "封面相册", datetime(2026, 8, 8))
         if yaml:
             fm = yaml.safe_load(md.split("---")[1])
-            self.assertEqual(fm["name"], "标题: 带冒号")
+            self.assertEqual(fm["title"], "标题: 带冒号")
 
     def test_yaml_numeric_tag_quoted(self):
         # 纯数字字符串必须加引号，否则 YAML 解析成 int，zod z.array(z.string()) 校验失败
@@ -293,15 +260,25 @@ class TestMarkdown(unittest.TestCase):
             self.assertEqual(fm["tags"], ["旅游", "2026"])
 
     def test_yaml_url_unquoted(self):
-        # 动态（plain 风格）URL 仍裸写，对齐现有 moments 数据风格
-        md = build_moment_md("内容", ["https://img.tsh520.cn/file/places/x.jpg"], ["日常"], datetime(2026, 8, 8))
-        self.assertIn("  - https://img.tsh520.cn/file/places/x.jpg", md)
         # 足迹（quoted 风格，2026-08 对齐博客新格式）photos 带引号
         md2 = build_place_md("陕西", "华山", "", ["https://img.tsh520.cn/file/places/x.jpg"], 1.0, 2.0, ["旅游"], datetime(2026, 8, 8))
         self.assertIn('  - "https://img.tsh520.cn/file/places/x.jpg"', md2)
         if yaml:
             fm = yaml.safe_load(md2.split("---")[1])
             self.assertEqual(fm["photos"], ["https://img.tsh520.cn/file/places/x.jpg"])
+
+    def test_moment_image_url_unwrapped(self):
+        """动态图片写进正文后 URL 保持裸写（不加引号、不带 <>）"""
+        md = build_moment_md("内容", ["https://img.tsh520.cn/file/places/x.jpg"], ["日常"], datetime(2026, 8, 8))
+        self.assertIn("![](https://img.tsh520.cn/file/places/x.jpg)", md)
+        if yaml:
+            fm = yaml.safe_load(md.split("---")[1])
+            self.assertEqual(list(fm.keys()), ["published", "tags"])
+        # 多张图按序各占一行
+        md2 = build_moment_md("", ["https://x/a.jpg", "https://x/b.jpg"], ["日常"])
+        self.assertIn("![](https://x/a.jpg)\n![](https://x/b.jpg)\n", md2)
+        # 只有图片没有文字时不留多余空行
+        self.assertIn("---\n\n![](https://x/a.jpg)", md2)
 
 
 class TestRequests(unittest.TestCase):
@@ -436,7 +413,7 @@ class TestSession(unittest.TestCase):
         self.assertTrue(s.expired(now + timedelta(minutes=29) + SESSION_TIMEOUT + timedelta(seconds=1)))
 
     def test_text_and_images(self):
-        s = Session("note", {"title": "t"})
+        s = Session("album", {"name": "t"})
         s.add_text("第一段")
         s.add_text("第二段")
         s.add_image("http://x/1.jpg", b"123")
@@ -771,21 +748,10 @@ class TestWizard(unittest.TestCase):
     def test_session_wizard_field(self):
         from blog_writer_core import Session
 
-        s = Session("note", {"title": "t"})
+        s = Session("album", {"name": "t"})
         self.assertIsNone(s.wizard)
-        s.wizard = {"step": "note_pick_notebook"}
-        self.assertEqual(s.wizard["step"], "note_pick_notebook")
-
-    def test_build_notebook_index_json(self):
-        import json
-
-        from blog_writer_core import build_notebook_index_json
-
-        md = build_notebook_index_json("全新笔记本")
-        data = json.loads(md)
-        self.assertEqual(data, {"name": "全新笔记本"})
-        # tab 缩进 + 中文不转义（对齐现有 _index.json 风格）
-        self.assertIn("\t\"name\": \"全新笔记本\"", md)
+        s.wizard = {"step": "album_pick"}
+        self.assertEqual(s.wizard["step"], "album_pick")
 
 
 # 微信公众号文章样例（结构对齐 2026-09-16 实测页面：section 分段、span leaf、
